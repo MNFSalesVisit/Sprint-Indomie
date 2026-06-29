@@ -1,0 +1,119 @@
+/* Modern login styles (CSS Module) */
+:global(body) {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--sa-primary, #7c3aed) 12%, #fff) 0%,
+    #ffffff 100%
+  );
+  min-height: 100vh;
+}
+
+.authWrapper {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.copyright {
+  margin-top: 20px;
+  font-size: 0.75rem;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.authCard {
+  width: 100%;
+  max-width: 420px;
+  background: #ffffff;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(31,41,55,0.11);
+  padding: 36px 32px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.logo {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+}
+.logoImg {
+  width: 100%; height: 100%; object-fit: contain; padding: 3px;
+}
+.logoInitial {
+  color: #fff;
+  font-weight: 900;
+  font-size: 1.4rem;
+}
+
+.companyName {
+  font-size: 0.72rem;
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 1px;
+}
+
+.formActions { display: flex; gap: 10px; margin-top: 4px; }
+
+.btnSignIn {
+  flex: 1;
+  padding: 10px 20px;
+  color: #fff;
+  border: none;
+  border-radius: 9px;
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+}
+.btnSignIn:disabled { opacity: 0.65; cursor: not-allowed; }
+.btnSignIn:hover:not(:disabled) { opacity: 0.88; }
+
+.btnMagic {
+  background: none;
+  border: none;
+  font-size: 0.875rem;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transition: opacity 0.15s;
+}
+.btnMagic:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.smallMuted { color: #6b7280; font-size: 0.875rem; margin-top: 3px; }
+.orDivider  { text-align: center; margin: 16px 0; color: #9ca3af; font-size: 0.875rem; }
+
+/* Password field wrapper with toggle button */
+.passwordWrap { position: relative; }
+.pwdToggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  padding: 4px;
+  font-size: 1rem;
+  color: #64748b;
+  cursor: pointer;
+}
+.pwdToggle:focus { outline: 2px solid #c7b5ff; outline-offset: 2px; border-radius: 6px; }

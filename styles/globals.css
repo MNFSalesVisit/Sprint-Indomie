@@ -1,0 +1,15 @@
+html,body,#__next{height:100%;}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;}
+main{max-width:900px;margin:0 auto}
+
+@keyframes sprintSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes sprintPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes sprintSkeleton {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

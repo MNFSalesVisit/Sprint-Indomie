@@ -1,0 +1,467 @@
+SALES VISIT SYSTEM (BLUEPRINT)
+The Sales Visit System is a role-based ERP platform designed to manage field sales operations, stock movements, shop visits, uplift approvals, and performance analytics.
+The system operates through three main modules:
+1.	Super Admin Module – System governance and configuration
+2.	Admin Module – Operational management and approvals
+3.	Salesperson Module (User Portal) – Field sales execution
+The platform enforces strict role-based access control (RBAC) to ensure users only access features relevant to their responsibilities.
+________________________________________
+MODULE 1: SUPER ADMIN MODULE
+The Super Admin is the highest-level role in the system and has full control over system configuration, users, security, and governance.
+________________________________________
+1. User & Access Management
+The Super Admin manages all system users and permissions.
+Core Functions
+•	Create, edit, enable, or disable user accounts.
+•	Reset passwords.
+•	Enforce password policies.
+•	Assign system roles:
+o	Super Admin
+o	Admin
+o	Salesperson (User)
+User Assignment Controls
+•	Assign regions and sub-regions to users.
+•	Assign vehicle type to users:
+o	Motorbike
+o	Van
+o	Bicycle
+
+
+
+Bulk User Management
+•	Bulk import users via Excel or CSV upload.
+•	Instantly activate or deactivate accounts.
+________________________________________
+2. Company & System Configuration
+The Super Admin manages overall system identity and global settings.
+Core Functions
+Company Profile Management
+•	Company name
+•	Company logo
+•	Contact details
+•	Business address
+System Branding
+•	System name
+•	Dashboard layout
+•	Theme color
+________________________________________
+3. Region & Territory Management
+Controls the geographic structure used by sales teams.
+Core Functions
+•	Create regions
+o	Example: Mombasa, Nairobi
+•	Add new regions dynamically.
+•	Create sub-regions under each region.
+•	Assign salespersons and admins to specific regions.
+________________________________________
+
+
+
+
+
+
+4. Product & SKU Management
+Central management of all products tracked in the system.
+Core Functions
+•	Create and manage SKUs.
+•	Define product details:
+o	Product name
+•	Enable or disable products.
+________________________________________
+5. System Settings & Customization
+Allows configuration of system behavior and interface.
+Core Functions
+•	Set theme colors.
+•	Configure UI preferences.
+________________________________________
+6. Data Backup & Recovery
+Ensures data reliability and system continuity.
+Core Functions
+•	Manual system backup
+•	Automatic scheduled backups
+•	Restore system from backup
+•	Data export formats:
+o	Excel
+o	CSV
+o	JSON
+•	Maintain audit trail of data changes
+________________________________________
+
+
+
+
+
+
+7. Master Data Management
+Central control of core operational data.
+Super Admin Controls
+•	Outlet/shop master database
+•	Shop data categorized per region
+________________________________________
+8. Security & Compliance
+Protects system data and ensures regulatory compliance.
+Security Features
+•	Data encryption
+•	Role-based access restrictions
+•	Session management
+•	Automatic account lock after multiple failed login attempts
+•	Compliance logs
+•	Privacy controls
+________________________________________
+9. Super Admin Dashboard & Analytics
+Provides full system visibility.
+Dashboard Insights
+•	Total users by role
+•	Active vs inactive salespersons
+•	System usage analytics
+•	Data submission trends
+________________________________________
+
+
+
+
+
+
+
+
+
+10. Manual Stock Balance Adjustment
+Allows corrections for user input mistakes.
+Example Scenario
+If a salesperson mistakenly enters:
+•	Uplifted 2 cartons instead of 3, or
+•	Incorrect sales quantity
+The Super Admin can edit the user stock balance per SKU.
+________________________________________
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+MODULE 2: ADMIN MODULE
+The Admin Module manages operational sales activities including uplift approvals, reporting, targets, and performance monitoring.
+________________________________________
+1. Admin Login
+•	Admin logs into their assigned account.
+•	Access is governed by role-based permissions.
+________________________________________
+2. Admin Dashboard (Home Page)
+The dashboard provides quick insights into uplift activities.
+Dashboard Metrics (Month-To-Date)
+•	Requested uplifts
+•	Pending uplifts
+•	Approved uplifts
+________________________________________
+3. Uplift Approval Management
+Admins manage uplift requests directly from the dashboard.
+Admin Actions
+•	Approve uplift requests
+•	Reject uplift requests with reason
+________________________________________
+4. WhatsApp Notification System
+When a salesperson submits an uplift request:
+The Admin automatically receives a WhatsApp notification.
+Example message:
+"Salim requests an uplift approval. Kindly log in to your account to approve or reject."
+This ensures fast response time and smooth field operations.
+________________________________________
+
+
+
+
+
+5. Admin Module Tabs
+The Admin interface includes the following tabs:
+1.	Uplifters Reports
+2.	Customer Reports
+3.	Map
+4.	Targets
+5.	Performance Reports
+________________________________________
+6. Uplifters Reports Tab
+Provides detailed reports on salesperson activity.
+Report Filters
+•	Year
+•	Month
+•	Region
+•	Subregion
+•	Salesperson
+Report Output
+•	Total visits
+•	Total shops sold
+•	Total cartons sold
+•	Performance percentage
+Performance Calculation
+Performance percentage is calculated using the monthly target assigned for that specific month.
+Export Options
+Reports can be exported as:
+•	Excel
+________________________________________
+
+
+
+
+7. Customer Reports Tab
+Provides shop-level analytics.
+Filters
+•	Year
+•	Month
+•	Region
+•	Subregion
+•	Shop name
+Report Output
+•	Total visits per shop
+•	Total cartons purchased
+•	Current stock position at the shop
+Export Option
+•	Excel download
+________________________________________
+8. Map Module (Leaflet Map)
+Provides geographical visualization of sales activity.
+Map Types
+1.	Uplift Map
+2.	Visit Map
+________________________________________
+Map Filters
+•	Year
+•	Month
+•	Region
+•	Subregion
+•	Salesperson
+________________________________________
+
+
+
+Map Marker Information
+Each map point displays:
+•	Shop name
+•	Current stock position
+•	Sale status
+•	Cartons sold
+•	Reason for not selling
+•	Cartons uplifted
+•	Salesperson selfie
+________________________________________
+Export Option
+Map data can be exported as HTML format.
+________________________________________
+9. Targets Module
+Admins configure sales targets.
+Target Setup
+Admin selects:
+•	Year
+•	Month
+•	Salesperson
+Then assigns:
+•	Monthly target (example: 200 cartons)
+Targets are used to calculate performance percentages.
+________________________________________
+
+
+10. Secure Logout
+Admins can securely log out of the system.
+________________________________________
+
+
+
+MODULE 3: SALESPERSON MODULE (USER PORTAL)
+The Salesperson Module is designed for field sales users to log visits, record sales, manage stock, and track performance.
+________________________________________
+1. User Login & Session Management
+•	User logs in using email authentication.
+•	An OTP (One-Time Password) is sent to email.
+•	Session remains active until logout.
+•	Refreshing the page does not log out the user.
+________________________________________
+2. User Portal Header
+Displays:
+•	Salesperson name (auto detected)
+•	Current date
+•	Profile icon
+•	Vehicle used for the day:
+o	Motorbike
+o	Van
+o	Bicycle
+________________________________________
+3. User Dashboard
+________________________________________
+SECTION 1
+1. Analytics Box
+Displays performance metrics:
+•	Total Visits MTD
+•	Converted Visits MTD
+•	Efficiency percentage
+•	Daily performance vs daily target
+•	Weekly performance vs weekly target
+•	Monthly performance vs monthly target
+Visualized using bar charts.
+________________________________________
+2. Stock Balance Box
+Displays current stock balance per SKU.
+Features
+•	Shows stock quantity
+•	If stock reaches zero, SKU is highlighted red
+________________________________________
+3. Uplift Status Box
+Displays latest 10 uplift requests.
+Status Indicators
+•	Pending – Orange
+•	Approved – Green
+•	Rejected – Red (with reason)
+________________________________________
+SECTION 2
+User selects:
+1.	Sales Visit
+2.	Uplift Visit
+________________________________________
+SALES VISIT FORM
+All fields are mandatory.
+________________________________________
+Field 1: Region
+User selects region.
+Only assigned regions and subregions appear.
+Example:
+•	Mombasa → only Mombasa subregions
+•	Nairobi → only Nairobi subregions
+________________________________________
+
+Field 2: Shop Name
+Scenario 1: New Shop
+User registers shop using format:
+Shop Name - Location
+Example:
+Abaa Shop - VOK
+System automatically stores:
+•	Shop name
+•	GPS coordinates
+The shop is then auto-selected.
+________________________________________
+Scenario 2: Existing Shop
+User searches by typing letters.
+Only shops within the selected region appear.
+________________________________________
+Field 3: Stock Position
+User enters current stock at shop per SKU.
+Features:
+•	Numeric input only
+•	
+o	/ – buttons
+•	Stock value overwrites previous value
+________________________________________
+Field 4: Sold?
+User selects:
+•	Yes
+•	No
+________________________________________
+If YES
+User enters quantity sold per SKU.
+System automatically:
+•	Deducts sold quantity from user stock balance
+Restrictions
+•	Cannot sell if stock balance = 0
+•	Cannot exceed available stock
+Error message:
+"You cannot sell. Your stock balance is 0. Uplift first."
+________________________________________
+If NO
+User selects reason:
+•	Financial constraints
+•	Stock available
+•	Other
+If Other, user enters custom reason.
+________________________________________
+Field 5: Selfie Capture
+User takes selfie during visit.
+Process:
+•	Camera opens
+•	User captures selfie
+•	Preview appears
+________________________________________
+Submit
+Upon submission:
+System captures automatically:
+•	Latitude
+•	Longitude
+Coordinates are not visible to user.
+Success message:
+"Submitted successfully."
+________________________________________
+UPLIFT VISIT FORM
+Fields include:
+1.	Region
+2.	Shop Name
+3.	Number of cartons
+4.	Stock position
+5.	Upload receipt
+________________________________________
+Submit
+System automatically captures GPS coordinates.
+Success message:
+"Your uplift has been successfully submitted. Wait for approval to proceed with visit."
+________________________________________
+UPLIFT LOGIC (STOCK CONTROL SYSTEM)
+The system enforces strict stock control.
+________________________________________
+1. Stock Balance Before Uplift
+If stock balance = 0
+User cannot sell any SKU.
+________________________________________
+2. Uplift Submission
+When uplift is submitted:
+•	Status = Pending Approval
+•	Stock balance remains unchanged
+________________________________________
+3. Uplift Approval
+When admin approves uplift:
+System automatically:
+•	Adds uplift cartons to stock balance
+Updated stock appears on dashboard stock box.
+________________________________________
+If Uplift is Rejected
+Stock balance remains unchanged.
+Rejection reason appears in Uplift Status Box.
+________________________________________
+4. Sales Restrictions
+Sales cannot exceed available stock.
+Error message:
+"You cannot sell more than your available stock balance. Please uplift stock first."
+________________________________________
+5. Stock Deduction After Sale
+After a sale is recorded:
+•	Sold quantity is deducted
+•	Updated balance appears immediately.
+________________________________________
+Example Scenario
+1.	Salesperson stock balance = 0 cartons
+2.	Salesperson requests uplift for 20 cartons
+3.	Status = Pending
+4.	Admin approves uplift
+5.	Stock balance becomes 20 cartons
+6.	Salesperson can sell up to 20 cartons only
+________________________________________
+System Security
+The system enforces Role-Based Access Control (RBAC):
+Role	Access
+Super Admin	Full system control
+Admin	Approvals, reports, targets
+Salesperson	Visit logging and uplift submission
+

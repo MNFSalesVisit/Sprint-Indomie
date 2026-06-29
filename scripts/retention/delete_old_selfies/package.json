@@ -1,0 +1,12 @@
+{
+  "name": "delete-old-selfies",
+  "version": "0.1.0",
+  "description": "Scheduled script to delete selfies older than 5 months from Supabase storage and clear DB references",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0"
+  }
+}

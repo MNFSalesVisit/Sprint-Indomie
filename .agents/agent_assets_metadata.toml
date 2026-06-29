@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "b8dO2Q8Zm-ASnJ1zvjccz"
+uri = "file://zipFile.zip"
+type = "unspecified"
+title = "Sales Visit System — Filtering Fixed"
