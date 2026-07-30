@@ -23,20 +23,6 @@ async function verifyAdmin(token) {
   return { id: appUser.id, role, allowedRegionIds };
 }
 
-/**
- * GET /api/admin/performance?year=YYYY&month=M[&user_id=UUID]
- *
- * Returns per-salesperson performance for the given month:
- * [{
- *   user_id, full_name, email,
- *   cartons_target,          — monthly target (null if not set)
- *   cartons_sold_mtd,        — total cartons sold in MTD window
- *   visits_total,            — total visits in period
- *   shops_sold,              — number of visits where at least 1 carton was sold (per-visit)
- *   shops_not_sold,          — number of visits where 0 cartons were sold (per-visit)
- *   performance_pct,         — cartons_sold_mtd / cartons_target * 100 (null if no target)
- * }]
- */
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
@@ -52,8 +38,6 @@ export default async function handler(req, res) {
   const { year, month, user_id, dateFrom, dateTo, subregion_id, region_id } = req.query;
   if (!year || !month) return res.status(400).json({ error: 'year and month are required' });
 
-  // ── Server-side cache (60 s TTL) — keyed by all filter params ────────────
-  // Only cache unfiltered or region-only calls (those used by the dashboard).
   const cacheKey = `perf:${allowedRegionIds.sort().join(',')}:${year}:${month}:${region_id || ''}:${subregion_id || ''}:${user_id || ''}:${dateFrom || ''}:${dateTo || ''}`;
   const cached = getCache(cacheKey);
   if (cached) return res.status(200).json(cached);
@@ -68,8 +52,6 @@ export default async function handler(req, res) {
               : dateFrom ? new Date(_now.getFullYear(), _now.getMonth(), _now.getDate() + 1).toISOString()
               : new Date(y, m, 1).toISOString();
 
-  // region_id narrows the scope: if Manager has assigned regions, intersect with the requested
-  // region so selecting "Mombasa" shows only Mombasa even when the manager covers multiple regions
   const effectiveRegionIds = allowedRegionIds.length > 0
     ? (region_id ? allowedRegionIds.filter(id => id === parseInt(region_id)) : allowedRegionIds)
     : region_id ? [parseInt(region_id)] : [];
@@ -79,7 +61,7 @@ export default async function handler(req, res) {
     .from('roles').select('id').eq('name', 'Salesperson').single();
   if (!roleRow) return res.status(200).json([]);
 
-  // ── 2. Fetch all active salespersons (or a single one) ────────────────
+  // ── 2. Fetch all active salespersons ─────────────────────────────────
   let usersQ = adminSupabase
     .from('app_users')
     .select('id, full_name, email, avatar_url')
@@ -87,7 +69,6 @@ export default async function handler(req, res) {
     .eq('is_active', true)
     .order('full_name');
 
-  // Apply region filter first, then narrow to a specific user_id if provided
   if (effectiveRegionIds.length > 0) {
     const { data: regionUsers } = await adminSupabase
       .from('user_regions').select('user_id').in('region_id', effectiveRegionIds);
@@ -121,85 +102,135 @@ export default async function handler(req, res) {
 
   const allowedShopIds = shopRegionRes.data ? (shopRegionRes.data || []).map(s => s.id) : null;
 
-  // ── 4. Fetch visits + visit_items in window (paginated) ────────────────
-  const _PAGE = 1000;
-  let _page   = 0;
-  const visits = [];
+  // ── 4. Fetch visits (paginated) ──────────────────────────────────────
+  const VISIT_PAGE_SIZE = 1000;
+  let visitPage = 0;
   let vErr = null;
+
+  // Aggregation maps (pre-initialised so every user has a value)
+  const userVisits = {};
+  const userCartonsSold = {};
+  const userShopsSold = {};
+  const userShopsNotSold = {};
+  userIds.forEach(id => {
+    userVisits[id] = 0;
+    userCartonsSold[id] = 0;
+    userShopsSold[id] = 0;
+    userShopsNotSold[id] = 0;
+  });
+
   while (true) {
     let visitsQ = adminSupabase
       .from('visits')
-      .select('id, user_id, shop_id, visit_items ( sold )')
+      .select('id, user_id, shop_id')
       .in('user_id', userIds)
       .eq('visit_type', 'sales')
       .gte('created_at', start)
       .lt('created_at', end)
-      .range(_page * _PAGE, (_page + 1) * _PAGE - 1);
+      .order('created_at', { ascending: true })
+      .range(visitPage * VISIT_PAGE_SIZE, (visitPage + 1) * VISIT_PAGE_SIZE - 1);
+
     if (subregion_id) visitsQ = visitsQ.eq('subregion_id', parseInt(subregion_id));
     if (effectiveRegionIds.length > 0) visitsQ = visitsQ.in('region_id', effectiveRegionIds);
-    const { data: _rows, error: _err } = await visitsQ;
-    if (_err) { vErr = _err; break; }
-    if (!_rows || _rows.length === 0) break;
-    visits.push(..._rows);
-    if (_rows.length < _PAGE) break;
-    _page++;
+
+    const { data: visitBatch, error: visitErr } = await visitsQ;
+    if (visitErr) { vErr = visitErr; break; }
+    if (!visitBatch || visitBatch.length === 0) break;
+
+    // ── 4b. Fetch ALL visit_items for this batch (paginated by result row) ─
+    const batchVisitIds = visitBatch.map(v => v.id);
+    const itemsByVisit = {};
+
+    if (batchVisitIds.length > 0) {
+      let itemOffset = 0;
+      const ITEM_LIMIT = 1000;
+      while (true) {
+        const { data: itemBatch, error: itemErr } = await adminSupabase
+          .from('visit_items')
+          .select('visit_id, sold')
+          .in('visit_id', batchVisitIds)
+          .order('visit_id', { ascending: true })
+          .range(itemOffset, itemOffset + ITEM_LIMIT - 1);
+
+        if (itemErr) { vErr = itemErr; break; }
+        if (!itemBatch || itemBatch.length === 0) break;
+
+        itemBatch.forEach(item => {
+          if (!itemsByVisit[item.visit_id]) itemsByVisit[item.visit_id] = [];
+          itemsByVisit[item.visit_id].push(item);
+        });
+
+        if (itemBatch.length < ITEM_LIMIT) break;
+        itemOffset += ITEM_LIMIT;
+      }
+    }
+    if (vErr) break;
+
+    // Aggregate this batch
+    visitBatch.forEach(v => {
+      const items = itemsByVisit[v.id] || [];
+      const totalSold = items.reduce((s, i) => s + (i.sold || 0), 0);
+
+      userVisits[v.user_id] += 1;
+      userCartonsSold[v.user_id] += totalSold;
+      if (totalSold > 0) userShopsSold[v.user_id] += 1;
+      else               userShopsNotSold[v.user_id] += 1;
+    });
+
+    if (visitBatch.length < VISIT_PAGE_SIZE) break;
+    visitPage++;
   }
   if (vErr) return res.status(500).json({ error: vErr.message });
 
-  // ── 5. Fetch uplifts in window ─────────────────────────────────────────
-  let upliftsQ = adminSupabase
-    .from('uplifts')
-    .select('id, user_id, shop_id')
-    .in('user_id', userIds)
-    .gte('created_at', start)
-    .lt('created_at', end);
-  if (allowedShopIds && allowedShopIds.length > 0) {
-    upliftsQ = upliftsQ.in('shop_id', allowedShopIds);
-  }
-  const { data: uplifts } = await upliftsQ;
+  // ── 5. Fetch uplifts (paginated) ──────────────────────────────────────
   const upliftCount = {};
   userIds.forEach(id => { upliftCount[id] = 0; });
-  (uplifts || []).forEach(u => { if (upliftCount[u.user_id] !== undefined) upliftCount[u.user_id]++; });
 
-  // ── 6. Aggregate per user ──────────────────────────────────────────────
-  const aggr = {};
-  userIds.forEach(id => {
-    aggr[id] = {
-      visits: 0,
-      cartons_sold: 0,
-      shops_sold: 0,
-      shops_not_sold: 0,
-    };
-  });
+  let upPage = 0;
+  const UP_PAGE = 1000;
+  while (true) {
+    let upliftsQ = adminSupabase
+      .from('uplifts')
+      .select('id, user_id, shop_id')
+      .in('user_id', userIds)
+      .gte('created_at', start)
+      .lt('created_at', end)
+      .order('created_at', { ascending: true })
+      .range(upPage * UP_PAGE, (upPage + 1) * UP_PAGE - 1);
 
-  (visits || []).forEach(v => {
-    if (!aggr[v.user_id]) return;
-    aggr[v.user_id].visits++;
-    const totalSold = (v.visit_items || []).reduce((s, i) => s + (i.sold || 0), 0);
-    aggr[v.user_id].cartons_sold += totalSold;
-    if (totalSold > 0) {
-      aggr[v.user_id].shops_sold++;
-    } else {
-      aggr[v.user_id].shops_not_sold++;
+    if (allowedShopIds && allowedShopIds.length > 0) {
+      upliftsQ = upliftsQ.in('shop_id', allowedShopIds);
     }
-  });
 
-  // ── 7. Build result ────────────────────────────────────────────────────
+    const { data: upRows, error: upErr } = await upliftsQ;
+    if (upErr) return res.status(500).json({ error: upErr.message });
+    if (!upRows || upRows.length === 0) break;
+
+    upRows.forEach(u => {
+      if (upliftCount[u.user_id] !== undefined) upliftCount[u.user_id] += 1;
+    });
+
+    if (upRows.length < UP_PAGE) break;
+    upPage++;
+  }
+
+  // ── 6. Build result ───────────────────────────────────────────────────
   const result = users.map(u => {
-    const a      = aggr[u.id];
     const target = targetMap[u.id] ?? null;
-    const pct    = target > 0 ? Math.round((a.cartons_sold / target) * 100) : null;
+    const sold   = userCartonsSold[u.id] || 0;
+    const pct    = target > 0 ? Math.round((sold / target) * 100) : null;
+
     return {
       user_id:          u.id,
-      full_name:        u.full_name || u.email,
-      email:            u.email,
+      full_name:        u.full_name || u.email || 'Unknown',
+      email:            u.email || '',
       avatar_url:       u.avatar_url || null,
       cartons_target:   target,
-      cartons_sold_mtd: a.cartons_sold,
-      visits_total:     a.visits,
+      cartons_sold_mtd: sold,
+      visits_total:     userVisits[u.id] || 0,
       uplift_count:     upliftCount[u.id] || 0,
-      shops_sold:       a.shops_sold,
-      shops_not_sold:   a.shops_not_sold,
+      shops_sold:       userShopsSold[u.id] || 0,
+      shops_not_sold:   userShopsNotSold[u.id] || 0,
       performance_pct:  pct,
     };
   });

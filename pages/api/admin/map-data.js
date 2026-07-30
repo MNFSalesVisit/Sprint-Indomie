@@ -34,7 +34,7 @@ export default async function handler(req, res) {
   logApiCall('/api/admin/map-data', 'admin');
 
   const { allowedRegionIds } = admin;
-  const { year, month, region_id, subregion_id, user_id, date_from, date_to } = req.query;
+  const { year, month, region_id, subregion_id, user_id, date_from, date_to, show_all } = req.query;
 
   // Date window
   let start, end;
@@ -48,86 +48,215 @@ export default async function handler(req, res) {
     end   = new Date(y, m, 1);
   }
 
-  // ── Visits ──────────────────────────────────────────────────────────────
-  let visitsQuery = adminSupabase
-    .from('visits')
-    .select(`
-      id, visit_type, latitude, longitude, selfie_path, created_at,
-      app_users!visits_user_id_fkey ( id, full_name ),
-      shops ( id, name, location, latitude, longitude, region_id, subregion_id ),
-      visit_items (
-        sold, stock_position, not_sold_reason,
-        products ( id, sku, name )
-      )
-    `)
-    .gte('created_at', start.toISOString())
-    .lt('created_at', end.toISOString())
-    .not('latitude', 'is', null)
-    .not('longitude', 'is', null)
-    .order('created_at', { ascending: false });
+  const startIso = start.toISOString();
+  const endIso   = end.toISOString();
 
-  if (allowedRegionIds.length > 0) {
-    const targetRegions = region_id
-      ? [parseInt(region_id)].filter(id => allowedRegionIds.includes(id))
-      : allowedRegionIds;
-    if (targetRegions.length === 0) return res.status(200).json([]);
-    visitsQuery = visitsQuery.in('region_id', targetRegions);
-  } else if (region_id) {
-    visitsQuery = visitsQuery.eq('region_id', parseInt(region_id));
+  const effectiveVisitRegions = allowedRegionIds.length > 0
+    ? (region_id ? [parseInt(region_id)].filter(id => allowedRegionIds.includes(id)) : allowedRegionIds)
+    : (region_id ? [parseInt(region_id)] : []);
+
+  // ── 1. Fetch visits (PAGINATED — no more 1,000-row silent truncation) ──
+  const visits = [];
+  let vPage = 0;
+  const V_PAGE = 1000;
+
+  while (true) {
+    let visitsQuery = adminSupabase
+      .from('visits')
+      .select('id, visit_type, latitude, longitude, selfie_path, created_at, shop_id, user_id')
+      .gte('created_at', startIso)
+      .lt('created_at', endIso)
+      .not('latitude', 'is', null)
+      .not('longitude', 'is', null)
+      .order('created_at', { ascending: false })
+      .range(vPage * V_PAGE, (vPage + 1) * V_PAGE - 1);
+
+    if (effectiveVisitRegions.length > 0) visitsQuery = visitsQuery.in('region_id', effectiveVisitRegions);
+    if (subregion_id) visitsQuery = visitsQuery.eq('subregion_id', parseInt(subregion_id));
+    if (user_id)      visitsQuery = visitsQuery.eq('user_id', user_id);
+
+    const { data: vChunk, error: vErr } = await visitsQuery;
+    if (vErr) return res.status(500).json({ error: vErr.message });
+    if (!vChunk || vChunk.length === 0) break;
+
+    visits.push(...vChunk);
+    if (vChunk.length < V_PAGE) break;
+    vPage++;
   }
-  if (subregion_id) visitsQuery = visitsQuery.eq('subregion_id', parseInt(subregion_id));
-  if (user_id)      visitsQuery = visitsQuery.eq('user_id', user_id);
 
-  const { data: visits, error: visitErr } = await visitsQuery;
-  if (visitErr) return res.status(500).json({ error: visitErr.message });
-
-  // ── Uplifts ────────────────────────────────────────────────────────────
-  let upliftsQuery = adminSupabase
-    .from('uplifts')
-    .select(`
-      id, cartons, status, rejected_reason, created_at,
-      app_users!uplifts_user_id_fkey ( id, full_name ),
-      shops ( id, name, location, latitude, longitude, region_id, subregion_id ),
-      uplift_items (
-        cartons,
-        products ( id, sku, name )
-      )
-    `)
-    .gte('created_at', start.toISOString())
-    .lt('created_at', end.toISOString())
-    .not('shops.latitude', 'is', null);
-
-  if (user_id) upliftsQuery = upliftsQuery.eq('user_id', user_id);
-
+  // ── 2. Pre-resolve valid shop IDs for uplift filtering ─────────────────
+  let validUpliftShopIds = null;
   let skipUplifts = false;
-  if (allowedRegionIds.length > 0) {
-    const { data: shopRows } = await adminSupabase
-      .from('shops').select('id').in('region_id', allowedRegionIds);
-    const upliftShopIds = (shopRows || []).map(s => s.id);
-    if (upliftShopIds.length === 0) skipUplifts = true;
-    else upliftsQuery = upliftsQuery.in('shop_id', upliftShopIds);
+
+  const shopFilterRegions = allowedRegionIds.length > 0
+    ? (region_id ? [parseInt(region_id)].filter(id => allowedRegionIds.includes(id)) : allowedRegionIds)
+    : (region_id ? [parseInt(region_id)] : []);
+  const needsShopFilter = shopFilterRegions.length > 0 || subregion_id;
+
+  if (needsShopFilter) {
+    let shopQ = adminSupabase
+      .from('shops')
+      .select('id, latitude, longitude, region_id, subregion_id')
+      .not('latitude', 'is', null)
+      .not('longitude', 'is', null);
+
+    if (shopFilterRegions.length > 0) shopQ = shopQ.in('region_id', shopFilterRegions);
+    if (subregion_id) shopQ = shopQ.eq('subregion_id', parseInt(subregion_id));
+
+    const { data: filteredShops } = await shopQ;
+    validUpliftShopIds = new Set((filteredShops || []).map(s => s.id));
+    if (validUpliftShopIds.size === 0) skipUplifts = true;
   }
 
-  const { data: uplifts, error: upliftErr } = skipUplifts
-    ? { data: [], error: null }
-    : await upliftsQuery;
-  if (upliftErr) return res.status(500).json({ error: upliftErr.message });
+  // ── 3. Fetch uplifts (PAGINATED — no more 1,000-row silent truncation) ─
+  const uplifts = [];
+  if (!skipUplifts) {
+    let uPage = 0;
+    const U_PAGE = 1000;
 
+    while (true) {
+      let upliftsQuery = adminSupabase
+        .from('uplifts')
+        .select('id, cartons, status, rejected_reason, created_at, shop_id, user_id')
+        .gte('created_at', startIso)
+        .lt('created_at', endIso)
+        .order('created_at', { ascending: false })
+        .range(uPage * U_PAGE, (uPage + 1) * U_PAGE - 1);
+
+      if (user_id) upliftsQuery = upliftsQuery.eq('user_id', user_id);
+      if (validUpliftShopIds) {
+        upliftsQuery = upliftsQuery.in('shop_id', Array.from(validUpliftShopIds));
+      }
+
+      const { data: uChunk, error: uErr } = await upliftsQuery;
+      if (uErr) return res.status(500).json({ error: uErr.message });
+      if (!uChunk || uChunk.length === 0) break;
+
+      uplifts.push(...uChunk);
+      if (uChunk.length < U_PAGE) break;
+      uPage++;
+    }
+  }
+
+  // ── 4. Batch-fetch shops & users ───────────────────────────────────────
+  const shopIds = new Set();
+  const userIds = new Set();
+
+  visits.forEach(v => { if (v.shop_id) shopIds.add(v.shop_id); if (v.user_id) userIds.add(v.user_id); });
+  uplifts.forEach(u => { if (u.shop_id) shopIds.add(u.shop_id); if (u.user_id) userIds.add(u.user_id); });
+
+  const shopIdsArr = Array.from(shopIds);
+  const userIdsArr = Array.from(userIds);
+
+  const [shopsRes, usersRes] = await Promise.all([
+    shopIdsArr.length > 0
+      ? adminSupabase.from('shops').select('id, name, location, latitude, longitude, region_id, subregion_id').in('id', shopIdsArr)
+      : Promise.resolve({ data: [] }),
+    userIdsArr.length > 0
+      ? adminSupabase.from('app_users').select('id, full_name').in('id', userIdsArr)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const shopMap = {};
+  (shopsRes.data || []).forEach(s => { shopMap[s.id] = s; });
+  const userMap = {};
+  (usersRes.data || []).forEach(u => { userMap[u.id] = u; });
+
+  // ── 5. Batch-fetch visit_items & uplift_items (PAGINATED) ──────────────
+  const visitIds  = visits.map(v => v.id);
+  const upliftIds = uplifts.map(u => u.id);
+
+  const visitItems = [];
+  if (visitIds.length > 0) {
+    let viPage = 0;
+    const VI_PAGE = 1000;
+    while (true) {
+      const { data: viChunk, error: viErr } = await adminSupabase
+        .from('visit_items')
+        .select('visit_id, sold, stock_position, not_sold_reason, product_id')
+        .in('visit_id', visitIds)
+        .order('visit_id', { ascending: true })
+        .range(viPage * VI_PAGE, (viPage + 1) * VI_PAGE - 1);
+      if (viErr) return res.status(500).json({ error: viErr.message });
+      if (!viChunk || viChunk.length === 0) break;
+      visitItems.push(...viChunk);
+      if (viChunk.length < VI_PAGE) break;
+      viPage++;
+    }
+  }
+
+  const upliftItems = [];
+  if (upliftIds.length > 0) {
+    let uiPage = 0;
+    const UI_PAGE = 1000;
+    while (true) {
+      const { data: uiChunk, error: uiErr } = await adminSupabase
+        .from('uplift_items')
+        .select('uplift_id, cartons, product_id')
+        .in('uplift_id', upliftIds)
+        .order('uplift_id', { ascending: true })
+        .range(uiPage * UI_PAGE, (uiPage + 1) * UI_PAGE - 1);
+      if (uiErr) return res.status(500).json({ error: uiErr.message });
+      if (!uiChunk || uiChunk.length === 0) break;
+      upliftItems.push(...uiChunk);
+      if (uiChunk.length < UI_PAGE) break;
+      uiPage++;
+    }
+  }
+
+  // ── 6. Batch-fetch products ────────────────────────────────────────────
+  const productIds = new Set();
+  visitItems.forEach(i => { if (i.product_id) productIds.add(i.product_id); });
+  upliftItems.forEach(i => { if (i.product_id) productIds.add(i.product_id); });
+
+  const productIdsArr = Array.from(productIds);
+  const productsRes = productIdsArr.length > 0
+    ? await adminSupabase.from('products').select('id, sku, name').in('id', productIdsArr)
+    : { data: [] };
+
+  const productMap = {};
+  (productsRes.data || []).forEach(p => { productMap[p.id] = p; });
+
+  // ── 7. Build item lookup maps ──────────────────────────────────────────
+  const visitItemsByVisit = {};
+  visitItems.forEach(item => {
+    if (!visitItemsByVisit[item.visit_id]) visitItemsByVisit[item.visit_id] = [];
+    visitItemsByVisit[item.visit_id].push({
+      sold: item.sold,
+      stock_position: item.stock_position,
+      not_sold_reason: item.not_sold_reason,
+      products: item.product_id ? (productMap[item.product_id] || null) : null,
+    });
+  });
+
+  const upliftItemsByUplift = {};
+  upliftItems.forEach(item => {
+    if (!upliftItemsByUplift[item.uplift_id]) upliftItemsByUplift[item.uplift_id] = [];
+    upliftItemsByUplift[item.uplift_id].push({
+      cartons: item.cartons,
+      products: item.product_id ? (productMap[item.product_id] || null) : null,
+    });
+  });
+
+  // ── 8. Build markers ───────────────────────────────────────────────────
   const markers = [];
 
-  // ── Process visits (no signed URL generation) ──────────────────────────
-  for (const v of visits || []) {
-    const lat = v.latitude  ?? v.shops?.latitude;
-    const lng = v.longitude ?? v.shops?.longitude;
-    if (!lat || !lng) continue;
-    if (region_id && v.shops?.region_id !== parseInt(region_id)) continue;
-    if (subregion_id && v.shops?.subregion_id !== parseInt(subregion_id)) continue;
+  for (const v of visits) {
+    const shop = v.shop_id ? shopMap[v.shop_id] : null;
 
-    const totalSold = (v.visit_items || []).reduce((s, i) => s + (i.sold || 0), 0);
-    const anyReason = (v.visit_items || []).find(i => i.not_sold_reason);
+    const lat = v.latitude ?? shop?.latitude;
+    const lng = v.longitude ?? shop?.longitude;
+    if (!lat || !lng) continue;
+
+    if (region_id    && shop?.region_id    !== parseInt(region_id))    continue;
+    if (subregion_id && shop?.subregion_id !== parseInt(subregion_id)) continue;
+
+    const items = visitItemsByVisit[v.id] || [];
+    const totalSold = items.reduce((s, i) => s + (i.sold || 0), 0);
+    const anyReason = items.find(i => i.not_sold_reason);
     const type = totalSold > 0 ? 'sold' : 'not_sold';
 
-    const skus = (v.visit_items || []).map(i => ({
+    const skus = items.map(i => ({
       sku:              i.products?.sku || '—',
       name:             i.products?.name || '—',
       sold:             i.sold || 0,
@@ -138,14 +267,14 @@ export default async function handler(req, res) {
 
     markers.push({
       id:               `visit-${v.id}`,
-      shop_id:          v.shops?.id || null,
-      shop_name:        v.shops?.name || 'Unknown Shop',
-      shop_location:    v.shops?.location || null,
+      shop_id:          shop?.id || null,
+      shop_name:        shop?.name || 'Unknown Shop',
+      shop_location:    shop?.location || null,
       latitude:         lat,
       longitude:        lng,
       type,
-      salesperson_name: v.app_users?.full_name || 'Unknown',
-      selfie_path:      v.selfie_path,    // only path – frontend will fetch signed URL on click
+      salesperson_name: userMap[v.user_id]?.full_name || 'Unknown',
+      selfie_path:      v.selfie_path,
       selfie_url:       null,
       skus,
       total_sold:       totalSold,
@@ -155,16 +284,19 @@ export default async function handler(req, res) {
     });
   }
 
-  // ── Process uplifts ────────────────────────────────────────────────────
-  for (const u of uplifts || []) {
-    const lat = u.shops?.latitude;
-    const lng = u.shops?.longitude;
-    if (!lat || !lng) continue;
-    if (region_id    && u.shops?.region_id    !== parseInt(region_id))    continue;
-    if (subregion_id && u.shops?.subregion_id !== parseInt(subregion_id)) continue;
+  for (const u of uplifts) {
+    const shop = shopMap[u.shop_id];
+    if (!shop) continue;
 
-    const totalUplifted = (u.uplift_items || []).reduce((s, i) => s + (i.cartons || 0), 0);
-    const skus = (u.uplift_items || []).map(i => ({
+    const lat = shop.latitude;
+    const lng = shop.longitude;
+    if (!lat || !lng) continue;
+    if (region_id && shop.region_id !== parseInt(region_id)) continue;
+    if (subregion_id && shop.subregion_id !== parseInt(subregion_id)) continue;
+
+    const items = upliftItemsByUplift[u.id] || [];
+    const totalUplifted = items.reduce((s, i) => s + (i.cartons || 0), 0);
+    const skus = items.map(i => ({
       sku:              i.products?.sku || '—',
       name:             i.products?.name || '—',
       sold:             0,
@@ -175,13 +307,13 @@ export default async function handler(req, res) {
 
     markers.push({
       id:               `uplift-${u.id}`,
-      shop_id:          u.shops?.id || null,
-      shop_name:        u.shops?.name || 'Unknown Shop',
-      shop_location:    u.shops?.location || null,
+      shop_id:          shop.id || null,
+      shop_name:        shop.name || 'Unknown Shop',
+      shop_location:    shop.location || null,
       latitude:         lat,
       longitude:        lng,
       type:             'uplift',
-      salesperson_name: u.app_users?.full_name || 'Unknown',
+      salesperson_name: userMap[u.user_id]?.full_name || 'Unknown',
       selfie_path:      null,
       selfie_url:       null,
       skus,
@@ -194,8 +326,8 @@ export default async function handler(req, res) {
     });
   }
 
-  // ── Unvisited shops (show_all=1) ───────────────────────────────────────
-  if (req.query.show_all === '1') {
+  // ── 9. Unvisited shops ─────────────────────────────────────────────────
+  if (show_all === '1') {
     const visitedShopIds = new Set(markers.map(m => m.shop_id).filter(Boolean));
 
     let shopsQuery = adminSupabase
@@ -204,12 +336,8 @@ export default async function handler(req, res) {
       .not('latitude', 'is', null)
       .not('longitude', 'is', null);
 
-    if (allowedRegionIds.length > 0) {
-      const targetRegions = region_id
-        ? [parseInt(region_id)].filter(id => allowedRegionIds.includes(id))
-        : allowedRegionIds;
-      if (targetRegions.length === 0) return res.status(200).json(markers);
-      shopsQuery = shopsQuery.in('region_id', targetRegions);
+    if (effectiveVisitRegions.length > 0) {
+      shopsQuery = shopsQuery.in('region_id', effectiveVisitRegions);
     } else if (region_id) {
       shopsQuery = shopsQuery.eq('region_id', parseInt(region_id));
     }
@@ -221,7 +349,7 @@ export default async function handler(req, res) {
       markers.push({
         id:            `unvisited-${shop.id}`,
         shop_id:       shop.id,
-        shop_name:     shop.name  || 'Unknown Shop',
+        shop_name:     shop.name || 'Unknown Shop',
         shop_location: shop.location || null,
         latitude:      shop.latitude,
         longitude:     shop.longitude,
