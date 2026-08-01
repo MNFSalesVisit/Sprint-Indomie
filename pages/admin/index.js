@@ -1246,7 +1246,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
   const [rnsLoading,     setRnsLoading]     = useState(false);
   const [rnsError,       setRnsError]       = useState('');
   const [rnsLimited,     setRnsLimited]     = useState(false);
-  const [rnsMeta,        setRnsMeta]        = useState({ total: 0, topReason: '', topRegion: '' });
+  const [rnsMeta,        setRnsMeta]        = useState({ total: 0, topReason: '', topRegion: '', totalPages: 1, page: 1 });
   const [rnsView,        setRnsView]        = useState('list');
   const [rnsMapOpen,     setRnsMapOpen]     = useState(false);
   const [rnsPreviewOpen, setRnsPreviewOpen] = useState(false);
@@ -1662,34 +1662,40 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
     return () => clearTimeout(stkDebounceRef.current);
   }, [token, stkRegionId, stkSubregionId]);
 
-  const loadRnsData = async () => {
-    const rnsKey = `${token}:${rnsRegionId}:${rnsSubregionId}:${rnsUserId}:${rnsYear}:${rnsMonth}:${rnsDateFrom}:${rnsDateTo}`;
+  const loadRnsData = async (page = 1) => {
+    const rnsKey = `${token}:${rnsRegionId}:${rnsSubregionId}:${rnsUserId}:${rnsYear}:${rnsMonth}:${rnsDateFrom}:${rnsDateTo}:${page}:${RNS_PAGE_SIZE}`;
     if (_rnsCache.key === rnsKey && _rnsCache.data) {
       setRnsRows(_rnsCache.data);
       setRnsLimited(_rnsCache.limited || false);
-      setRnsMeta(_rnsCache.meta || { total: 0, topReason: '', topRegion: '' });
+      setRnsMeta(_rnsCache.meta || { total: 0, topReason: '', topRegion: '', totalPages: 1, page: 1 });
+      setRnsPage(page);
       return;
     }
     setRnsLoading(true); setRnsError('');
     try {
       const params = new URLSearchParams();
+      params.set('page', String(page));
+      params.set('per_page', String(RNS_PAGE_SIZE));
       if (rnsRegionId)    params.set('region_id',    rnsRegionId);
       if (rnsSubregionId) params.set('subregion_id', rnsSubregionId);
       if (rnsUserId)      params.set('user_id',      rnsUserId);
-      if (rnsDateFrom) params.set('date_from', rnsDateFrom);
-      if (rnsDateTo)   params.set('date_to',   rnsDateTo);
+      if (rnsDateFrom)    params.set('date_from',   rnsDateFrom);
+      if (rnsDateTo)      params.set('date_to',     rnsDateTo);
+      if (rnsYear)        params.set('year',        rnsYear);
+      if (rnsMonth)       params.set('month',       rnsMonth);
       const r = await fetch(`/api/admin/reasons-not-sold?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const limited  = r.headers.get('X-Data-Limited') === 'true';
-      const total    = parseInt(r.headers.get('X-Total-Count') || '0', 10);
-      const topReason = r.headers.get('X-Top-Reason') || '';
-      const topRegion = r.headers.get('X-Top-Region') || '';
+      const limited    = r.headers.get('X-Data-Limited') === 'true';
+      const total      = parseInt(r.headers.get('X-Total-Count') || '0', 10);
+      const totalPages = parseInt(r.headers.get('X-Total-Pages') || '1', 10);
+      const topReason  = r.headers.get('X-Top-Reason') || '';
+      const topRegion  = r.headers.get('X-Top-Region') || '';
       const d = await r.json();
       if (!r.ok) { setRnsError(d.error || 'Failed to load'); return; }
-      const meta = { total, topReason, topRegion };
+      const meta = { total, topReason, topRegion, totalPages, page };
       _rnsCache.key = rnsKey; _rnsCache.data = d; _rnsCache.limited = limited; _rnsCache.meta = meta;
-      setRnsRows(d); setRnsLimited(limited); setRnsMeta(meta); setRnsPage(1);
+      setRnsRows(d); setRnsLimited(limited); setRnsMeta(meta); setRnsPage(page);
     } catch { setRnsError('Network error.'); }
     finally { setRnsLoading(false); }
   };
@@ -1697,7 +1703,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
   useEffect(() => {
     if (!token) return;
     clearTimeout(rnsDebounceRef.current);
-    rnsDebounceRef.current = setTimeout(() => { loadRnsData(); }, 400);
+    rnsDebounceRef.current = setTimeout(() => { loadRnsData(1); }, 400);
     return () => clearTimeout(rnsDebounceRef.current);
   }, [token, rnsRegionId, rnsSubregionId, rnsUserId, rnsYear, rnsMonth, rnsDateFrom, rnsDateTo]);
 
@@ -2876,8 +2882,8 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
         )}
 
         {!rnsLoading && rnsRows.length > 0 && rnsView === 'list' && (() => {
-          const pageRows = rnsRows.slice((rnsPage - 1) * RNS_PAGE_SIZE, rnsPage * RNS_PAGE_SIZE);
-          const totalPages = Math.ceil(rnsRows.length / RNS_PAGE_SIZE);
+          const pageRows = rnsRows;
+          const totalPages = Math.max(1, rnsMeta.totalPages || 1);
           return (
             <div style={{ overflowX: 'auto', borderRadius: 14, border: '1px solid #e2e8f0', boxShadow: '0 1px 6px rgba(0,0,0,0.04)' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }}>
@@ -2951,7 +2957,11 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
               {totalPages > 1 && (
                 <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, padding: '12px 16px', borderTop: '1px solid #f1f5f9' }}>
                   <button
-                    onClick={() => setRnsPage(p => Math.max(1, p - 1))}
+                    onClick={() => {
+                      const nextPage = Math.max(1, rnsPage - 1);
+                      setRnsPage(nextPage);
+                      loadRnsData(nextPage);
+                    }}
                     disabled={rnsPage === 1}
                     style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: rnsPage === 1 ? '#f8fafc' : '#fff', color: rnsPage === 1 ? '#cbd5e1' : '#475569', fontWeight: 700, cursor: rnsPage === 1 ? 'default' : 'pointer', fontSize: '0.8rem' }}
                   >
@@ -2961,7 +2971,11 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
                     Page {rnsPage} of {totalPages}
                   </span>
                   <button
-                    onClick={() => setRnsPage(p => Math.min(totalPages, p + 1))}
+                    onClick={() => {
+                      const nextPage = Math.min(totalPages, rnsPage + 1);
+                      setRnsPage(nextPage);
+                      loadRnsData(nextPage);
+                    }}
                     disabled={rnsPage === totalPages}
                     style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: rnsPage === totalPages ? '#f8fafc' : '#fff', color: rnsPage === totalPages ? '#cbd5e1' : '#475569', fontWeight: 700, cursor: rnsPage === totalPages ? 'default' : 'pointer', fontSize: '0.8rem' }}
                   >

@@ -22,6 +22,41 @@ async function verifyAdmin(token) {
   return { id: appUser.id, role, allowedRegionIds };
 }
 
+function parseDateValue(value, fallback) {
+  if (!value) return fallback;
+  const [year, month, day] = String(value).split('-').map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return fallback;
+  }
+  return new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+}
+
+function buildDateWindow(dateFrom, dateTo, year, month) {
+  if (dateFrom || dateTo) {
+    const startDate = parseDateValue(dateFrom, new Date(Date.UTC(2000, 0, 1)));
+    const endDate = parseDateValue(dateTo, new Date(Date.UTC(2100, 11, 31)));
+    return {
+      start: startDate.toISOString(),
+      end: new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate(), 23, 59, 59, 999)).toISOString(),
+    };
+  }
+
+  if (year && month) {
+    const y = parseInt(year, 10);
+    const m = parseInt(month, 10);
+    return {
+      start: new Date(Date.UTC(y, m - 1, 1, 0, 0, 0)).toISOString(),
+      end: new Date(Date.UTC(y, m, 1, 0, 0, 0)).toISOString(),
+    };
+  }
+
+  const now = new Date();
+  return {
+    start: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0)).toISOString(),
+    end: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString(),
+  };
+}
+
 /**
  * GET /api/admin/reasons-not-sold
  *   [&region_id=N]        [&subregion_id=N]
@@ -77,22 +112,7 @@ export default async function handler(req, res) {
     region_id || subregion_id || user_id || date_from || date_to || (year && month);
 
   // ── Build date window (UTC so month boundaries don't shift) ─────────────
-  let start, end;
-  if (date_from || date_to) {
-    const [fy, fm, fd] = (date_from || '2000-01-01').split('-').map(Number);
-    const [ty, tm, td] = (date_to   || '2100-01-01').split('-').map(Number);
-    start = new Date(Date.UTC(fy, fm - 1, fd, 0, 0, 0)).toISOString();
-    end   = new Date(Date.UTC(ty, tm - 1, td, 23, 59, 59, 999)).toISOString();
-  } else if (year && month) {
-    const y = parseInt(year, 10);
-    const m = parseInt(month, 10);
-    start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0)).toISOString();
-    end   = new Date(Date.UTC(y, m, 1, 0, 0, 0)).toISOString(); // 1st of next month
-  } else {
-    const now = new Date();
-    start = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1, 0, 0, 0)).toISOString();
-    end   = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0)).toISOString();
-  }
+  const { start, end } = buildDateWindow(date_from, date_to, year, month);
 
   // ── Build effective region scope ────────────────────────────────────────
   let effectiveRegionIds = [];
@@ -166,16 +186,17 @@ export default async function handler(req, res) {
   // ── Filter to not-sold visits with explicit reasons ─────────────────────
   const notSoldVisitsRaw = [];
   for (const v of visits) {
-    const items = itemsMap[v.id] || [];
+    const items = (itemsMap[v.id] || []).filter(item => item && (item.sold || 0) > 0 || item?.not_sold_reason);
     const totalSold = items.reduce((s, i) => s + (i.sold || 0), 0);
-    if (totalSold > 0) continue;
+    const reasons = items
+      .filter(i => i.not_sold_reason && String(i.not_sold_reason).trim() !== '')
+      .map(i => String(i.not_sold_reason).trim());
 
-    const reasonItem = items.find(
-      i => i.not_sold_reason && String(i.not_sold_reason).trim() !== ''
-    );
-    if (!reasonItem) continue;
+    // Match the rest of the app: a visit is considered not sold when the summed
+    // cartons sold is zero and there is at least one explicit not-sold reason.
+    if (totalSold > 0 || reasons.length === 0) continue;
 
-    const rawReason = reasonItem.not_sold_reason;
+    const rawReason = reasons[0];
     const reason = rawReason.toLowerCase() === 'other' ? 'Other (no details provided)' : rawReason;
 
     notSoldVisitsRaw.push({
@@ -193,6 +214,8 @@ export default async function handler(req, res) {
       selfie_url:       null,
     });
   }
+
+  notSoldVisitsRaw.sort((a, b) => new Date(b.visited_at) - new Date(a.visited_at));
 
   // ── Sign selfie URLs (skip for large sets to avoid storage timeout) ─────
   if (notSoldVisitsRaw.length <= 80) {
