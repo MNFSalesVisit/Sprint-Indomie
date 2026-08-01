@@ -792,14 +792,35 @@ function VisitTab({ primary, accent, onNavigate }) {
     }
     if (selfieDataUrl) return; // photo already taken, don't restart stream
     setCameraError('');
-    navigator.mediaDevices?.getUserMedia({
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError('Camera not available. Please ensure you are on a secure (HTTPS) connection and your browser supports camera access.');
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 640 } },
       audio: false,
     }).then(stream => {
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-    }).catch(() => {
-      setCameraError('Camera access denied. Please allow camera permissions and reload.');
+    }).catch(err => {
+      const name = err?.name || '';
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setCameraError('Camera access denied. Please allow camera permissions and reload.');
+      } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        setCameraError('No camera found on this device. Please connect a camera and try again.');
+      } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+        setCameraError('Camera is in use by another application. Please close it and try again.');
+      } else if (name === 'OverconstrainedError') {
+        // Retry without the facingMode constraint - some devices reject 'user'
+        navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+          .then(stream => {
+            streamRef.current = stream;
+            if (videoRef.current) videoRef.current.srcObject = stream;
+          })
+          .catch(() => setCameraError('Could not start camera. Please check your device and try again.'));
+      } else {
+        setCameraError('Could not start camera. Please check your device settings and try again.');
+      }
     });
     return () => {
       if (streamRef.current) {
@@ -1185,14 +1206,35 @@ function VisitTab({ primary, accent, onNavigate }) {
     setSelfieDataUrl(null);
     setSubmitError('');
     setCameraError('');
-    navigator.mediaDevices?.getUserMedia({
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError('Camera not available. Please ensure you are on a secure (HTTPS) connection and your browser supports camera access.');
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 640 } },
       audio: false,
     }).then(stream => {
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-    }).catch(() => {
-      setCameraError('Camera access denied. Please allow camera permissions and reload.');
+    }).catch(err => {
+      const name = err?.name || '';
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setCameraError('Camera access denied. Please allow camera permissions and reload.');
+      } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        setCameraError('No camera found on this device. Please connect a camera and try again.');
+      } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+        setCameraError('Camera is in use by another application. Please close it and try again.');
+      } else if (name === 'OverconstrainedError') {
+        // Retry without the facingMode constraint - some devices reject 'user'
+        navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+          .then(stream => {
+            streamRef.current = stream;
+            if (videoRef.current) videoRef.current.srcObject = stream;
+          })
+          .catch(() => setCameraError('Could not start camera. Please check your device and try again.'));
+      } else {
+        setCameraError('Could not start camera. Please check your device settings and try again.');
+      }
     });
   };
 

@@ -27,22 +27,21 @@ async function verifyAdmin(token) {
  *   [&region_id=N]        [&subregion_id=N]
  *   [&user_id=UUID]
  *   [&date_from=YYYY-MM-DD] [&date_to=YYYY-MM-DD]
+ *   [&year=YYYY] [&month=M]
+ *   [&page=N] [&per_page=N]        (default page=1, per_page=20, max 100)
  *
  * Returns visits where total sold = 0, with the not-sold reason.
- * [{
- *   visit_id, shop_name, shop_location, subregion_name, region_name,
- *   salesperson_name, visited_at,
- *   reason,
- *   latitude, longitude, selfie_path, selfie_url,
- * }]
  * Sorted by visited_at desc.
- * Default (no filters) → 10 records; filtered → full dataset.
+ * Default (no filters) → 10 records; filtered → full dataset with pagination.
  *
  * Response headers:
- *   X-Data-Limited: true   when result is capped at 10
- *   X-Total-Count: N       total not-sold visits count (for summary)
+ *   X-Data-Limited: true   when result is capped at 10 (no filters)
+ *   X-Total-Count: N       total not-sold visits count
  *   X-Top-Reason: text     most common reason
  *   X-Top-Region: text     region with most not-sold visits
+ *   X-Page: N              current page
+ *   X-Per-Page: N          items per page
+ *   X-Total-Pages: N       total pages available
  */
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
@@ -57,40 +56,64 @@ export default async function handler(req, res) {
   await applyLowPriorityThrottle();
 
   const { allowedRegionIds } = admin;
-  const { region_id, subregion_id, user_id, date_from, date_to, year, month } = req.query;
+  const {
+    region_id,
+    subregion_id,
+    user_id,
+    date_from,
+    date_to,
+    year,
+    month,
+    page,
+    per_page,
+  } = req.query;
 
-  // ── Build date window ───────────────────────────────────────────────────
-  // Priority: explicit date_from/date_to > year+month > current month default
+  // ── Pagination params ───────────────────────────────────────────────────
+  const currentPage = Math.max(1, parseInt(page, 10) || 1);
+  const itemsPerPage = Math.min(100, Math.max(1, parseInt(per_page, 10) || 20));
+
+  // ── Determine if any real filter is applied ─────────────────────────────
+  const hasFilters =
+    region_id || subregion_id || user_id || date_from || date_to || (year && month);
+
+  // ── Build date window (UTC so month boundaries don't shift) ─────────────
   let start, end;
   if (date_from || date_to) {
-    start = date_from ? new Date(date_from + 'T00:00:00').toISOString() : new Date(2000, 0, 1).toISOString();
-    end   = date_to   ? new Date(date_to   + 'T23:59:59.999').toISOString() : new Date(Date.now() + 86400000).toISOString();
+    const [fy, fm, fd] = (date_from || '2000-01-01').split('-').map(Number);
+    const [ty, tm, td] = (date_to   || '2100-01-01').split('-').map(Number);
+    start = new Date(Date.UTC(fy, fm - 1, fd, 0, 0, 0)).toISOString();
+    end   = new Date(Date.UTC(ty, tm - 1, td, 23, 59, 59, 999)).toISOString();
   } else if (year && month) {
-    const y = parseInt(year);
-    const m = parseInt(month);
-    start = new Date(y, m - 1, 1).toISOString();
-    end   = new Date(y, m, 1).toISOString();
+    const y = parseInt(year, 10);
+    const m = parseInt(month, 10);
+    start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0)).toISOString();
+    end   = new Date(Date.UTC(y, m, 1, 0, 0, 0)).toISOString(); // 1st of next month
   } else {
     const now = new Date();
-    start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-    end   = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+    start = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1, 0, 0, 0)).toISOString();
+    end   = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0)).toISOString();
   }
 
   // ── Build effective region scope ────────────────────────────────────────
   let effectiveRegionIds = [];
   if (allowedRegionIds.length > 0) {
     effectiveRegionIds = region_id
-      ? allowedRegionIds.filter(id => id === parseInt(region_id))
+      ? allowedRegionIds.filter(id => id === parseInt(region_id, 10))
       : allowedRegionIds;
-    if (effectiveRegionIds.length === 0) return res.status(200).json([]);
+    if (effectiveRegionIds.length === 0) {
+      res.setHeader('X-Total-Count', '0');
+      res.setHeader('X-Top-Reason', '');
+      res.setHeader('X-Top-Region', '');
+      res.setHeader('X-Page', '1');
+      res.setHeader('X-Per-Page', String(itemsPerPage));
+      res.setHeader('X-Total-Pages', '0');
+      return res.status(200).json([]);
+    }
   } else if (region_id) {
-    effectiveRegionIds = [parseInt(region_id)];
+    effectiveRegionIds = [parseInt(region_id, 10)];
   }
 
-  // ── Fetch visits in window (no nested visit_items to avoid JOIN timeout) ──
-  // Split into two queries: visits first, then visit_items separately.
-  // This matches the pattern used in customer-analysis.js and avoids DB timeouts
-  // on large datasets where the nested JOIN becomes expensive.
+  // ── Fetch visits ────────────────────────────────────────────────────────
   let visitsQ = adminSupabase
     .from('visits')
     .select(
@@ -101,11 +124,16 @@ export default async function handler(req, res) {
     .eq('visit_type', 'sales')
     .gte('created_at', start)
     .lt('created_at', end)
-    .order('created_at', { ascending: false })
-    .limit(500);
+    .order('created_at', { ascending: false });
+
+  // CRITICAL FIX: only cap at 10 when the user has NOT asked for a specific filter
+  if (!hasFilters) {
+    visitsQ = visitsQ.limit(10);
+    res.setHeader('X-Data-Limited', 'true');
+  }
 
   if (effectiveRegionIds.length > 0) visitsQ = visitsQ.in('region_id', effectiveRegionIds);
-  if (subregion_id) visitsQ = visitsQ.eq('subregion_id', parseInt(subregion_id));
+  if (subregion_id) visitsQ = visitsQ.eq('subregion_id', parseInt(subregion_id, 10));
   if (user_id)      visitsQ = visitsQ.eq('user_id', user_id);
 
   const { data: visits, error: visitErr } = await visitsQ;
@@ -115,10 +143,13 @@ export default async function handler(req, res) {
     res.setHeader('X-Total-Count', '0');
     res.setHeader('X-Top-Reason', '');
     res.setHeader('X-Top-Region', '');
+    res.setHeader('X-Page', '1');
+    res.setHeader('X-Per-Page', String(itemsPerPage));
+    res.setHeader('X-Total-Pages', '0');
     return res.status(200).json([]);
   }
 
-  // ── Fetch visit_items in a separate query ──────────────────────────────
+  // ── Fetch visit_items separately (avoids JOIN timeout) ──────────────────
   const visitIds = visits.map(v => v.id);
   const { data: visitItemsRaw, error: itemErr } = await adminSupabase
     .from('visit_items')
@@ -132,37 +163,38 @@ export default async function handler(req, res) {
     itemsMap[item.visit_id].push(item);
   }
 
-  // ── Filter to only not-sold visits with explicit reasons ────────────────
-  // Only include visits where (a) total sold = 0 AND (b) at least one item
-  // has a non-null not_sold_reason — this prevents visits that happened to
-  // record 0 sales (but were never explicitly marked "not sold") from
-  // appearing in this report with "No reason provided".
+  // ── Filter to not-sold visits with explicit reasons ─────────────────────
   const notSoldVisitsRaw = [];
   for (const v of visits) {
     const items = itemsMap[v.id] || [];
     const totalSold = items.reduce((s, i) => s + (i.sold || 0), 0);
     if (totalSold > 0) continue;
-    const reasonItem = items.find(i => i.not_sold_reason && String(i.not_sold_reason).trim() !== '');
-    if (!reasonItem) continue; // skip visits without an explicit not-sold reason
+
+    const reasonItem = items.find(
+      i => i.not_sold_reason && String(i.not_sold_reason).trim() !== ''
+    );
+    if (!reasonItem) continue;
+
     const rawReason = reasonItem.not_sold_reason;
     const reason = rawReason.toLowerCase() === 'other' ? 'Other (no details provided)' : rawReason;
+
     notSoldVisitsRaw.push({
-      visit_id:          v.id,
-      shop_name:         v.shops?.name              || 'Unknown Shop',
-      shop_location:     v.shops?.location          || null,
-      subregion_name:    v.shops?.subregions?.name  || null,
-      region_name:       v.shops?.regions?.name     || null,
-      salesperson_name:  v.app_users?.full_name     || 'Unknown',
-      visited_at:        v.created_at,
+      visit_id:         v.id,
+      shop_name:        v.shops?.name             || 'Unknown Shop',
+      shop_location:    v.shops?.location         || null,
+      subregion_name:   v.shops?.subregions?.name || null,
+      region_name:      v.shops?.regions?.name    || null,
+      salesperson_name: v.app_users?.full_name    || 'Unknown',
+      visited_at:       v.created_at,
       reason,
-      latitude:          v.latitude   ?? null,
-      longitude:         v.longitude  ?? null,
-      selfie_path:       v.selfie_path || null,
-      selfie_url:        null,
+      latitude:         v.latitude  ?? null,
+      longitude:        v.longitude ?? null,
+      selfie_path:      v.selfie_path || null,
+      selfie_url:       null,
     });
   }
 
-  // Pass 2: sign selfie URLs in parallel — skip for large result sets to prevent storage timeouts
+  // ── Sign selfie URLs (skip for large sets to avoid storage timeout) ─────
   if (notSoldVisitsRaw.length <= 80) {
     await Promise.all(
       notSoldVisitsRaw
@@ -175,26 +207,32 @@ export default async function handler(req, res) {
         })
     );
   }
-  const notSoldVisits = notSoldVisitsRaw;
 
-  // ── Build summary metadata ──────────────────────────────────────────────
-  const total = notSoldVisits.length;
+  // ── Summary metadata ────────────────────────────────────────────────────
+  const total = notSoldVisitsRaw.length;
 
-  // Top reason
   const reasonCounts = {};
-  notSoldVisits.forEach(r => { reasonCounts[r.reason] = (reasonCounts[r.reason] || 0) + 1; });
+  notSoldVisitsRaw.forEach(r => { reasonCounts[r.reason] = (reasonCounts[r.reason] || 0) + 1; });
   const topReason = Object.entries(reasonCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
 
-  // Most affected region
   const regionCounts = {};
-  notSoldVisits.forEach(r => {
+  notSoldVisitsRaw.forEach(r => {
     if (r.region_name) regionCounts[r.region_name] = (regionCounts[r.region_name] || 0) + 1;
   });
   const topRegion = Object.entries(regionCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
 
+  // ── Pagination slice ────────────────────────────────────────────────────
+  const totalPages = Math.ceil(total / itemsPerPage);
+  const safePage = Math.min(currentPage, totalPages || 1);
+  const startIndex = (safePage - 1) * itemsPerPage;
+  const paginatedVisits = notSoldVisitsRaw.slice(startIndex, startIndex + itemsPerPage);
+
   res.setHeader('X-Total-Count', String(total));
   res.setHeader('X-Top-Reason',  topReason);
   res.setHeader('X-Top-Region',  topRegion);
+  res.setHeader('X-Page',        String(safePage));
+  res.setHeader('X-Per-Page',    String(itemsPerPage));
+  res.setHeader('X-Total-Pages', String(totalPages));
 
-  return res.status(200).json(notSoldVisits);
+  return res.status(200).json(paginatedVisits);
 }

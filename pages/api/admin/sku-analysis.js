@@ -26,17 +26,9 @@ async function verifyAdmin(token) {
  * GET /api/admin/sku-analysis
  *   ?year=YYYY&month=M
  *   [&dateFrom=YYYY-MM-DD] [&dateTo=YYYY-MM-DD]
- *   [&user_id=UUID]        [&subregion_id=N]
+ *   [&user_id=UUID]        [&subregion_id=N] [&region_id=N]
  *
- * Returns per-SKU carton sales breakdown:
- * [{
- *   product_id, sku, name,
- *   total_sold,         — total cartons sold in window
- *   visits_count,       — distinct visits that had this SKU sold
- *   by_salesperson: [{ user_id, full_name, sold }],
- *   by_subregion:   [{ subregion_id, subregion_name, sold }],
- * }]
- * Sorted by total_sold desc.
+ * Returns per-SKU carton sales breakdown.
  */
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
@@ -57,7 +49,6 @@ export default async function handler(req, res) {
   const y = parseInt(year);
   const m = parseInt(month);
 
-  // Build date window — dateFrom/dateTo override month boundaries if provided
   const start = dateFrom
     ? new Date(dateFrom + 'T00:00:00').toISOString()
     : new Date(y, m - 1, 1).toISOString();
@@ -65,88 +56,117 @@ export default async function handler(req, res) {
     ? new Date(dateTo + 'T23:59:59.999').toISOString()
     : new Date(y, m, 1).toISOString();
 
-  // ── 1. Fetch visits with their items in window ──────────────────────────
-  let visitsQ = adminSupabase
-    .from('visits')
-    .select('id, user_id, subregion_id, visit_items(product_id, sold)')
-    .eq('visit_type', 'sales')
-    .gte('created_at', start)
-    .lt('created_at', end);
-
-  if (user_id)      visitsQ = visitsQ.eq('user_id', user_id);
-  if (subregion_id) visitsQ = visitsQ.eq('subregion_id', parseInt(subregion_id));
-  // region_id narrows the scope: if Manager has assigned regions, intersect with the requested
-  // region so selecting "Mombasa" shows only Mombasa even when the manager covers multiple regions
   const effectiveRegionIds = allowedRegionIds.length > 0
     ? (region_id ? allowedRegionIds.filter(id => id === parseInt(region_id)) : allowedRegionIds)
     : region_id ? [parseInt(region_id)] : [];
-  if (effectiveRegionIds.length > 0) visitsQ = visitsQ.in('region_id', effectiveRegionIds);
 
-  const { data: visits, error: vErr } = await visitsQ;
-  if (vErr) return res.status(500).json({ error: vErr.message });
-
-  if (!visits || visits.length === 0) return res.status(200).json([]);
-
-  // ── 2. Fetch all products for sku/name lookup ───────────────────────────
-  const { data: products } = await adminSupabase
-    .from('products')
-    .select('id, sku, name');
-  const productMap = {};
-  (products || []).forEach(p => { productMap[p.id] = p; });
-
-  // ── 3. Fetch user names for the visits ─────────────────────────────────
-  const userIds = [...new Set(visits.map(v => v.user_id).filter(Boolean))];
-  const userMap = {};
-  if (userIds.length > 0) {
-    const { data: users } = await adminSupabase
-      .from('app_users')
-      .select('id, full_name, email')
-      .in('id', userIds);
-    (users || []).forEach(u => { userMap[u.id] = u.full_name || u.email; });
-  }
-
-  // ── 4. Fetch subregion names for the visits ────────────────────────────
-  const subregionIds = [...new Set(visits.map(v => v.subregion_id).filter(Boolean))];
-  const subregionMap = {};
-  if (subregionIds.length > 0) {
-    const { data: subregions } = await adminSupabase
-      .from('subregions')
-      .select('id, name')
-      .in('id', subregionIds);
-    (subregions || []).forEach(s => { subregionMap[s.id] = s.name; });
-  }
-
-  // ── 5. Aggregate per SKU ────────────────────────────────────────────────
-  // skuAggr: { product_id: { total_sold, visitSet, by_user, by_subregion } }
+  // ── 1. Paginate visits batch-by-batch (NO embedded join) ────────────────
   const skuAggr = {};
+  const visitMap = {};
+  const V_PAGE = 1000;
+  let vPage = 0;
 
-  visits.forEach(visit => {
-    (visit.visit_items || []).forEach(item => {
-      if (!item.sold || item.sold <= 0) return;
-      const pid = item.product_id;
-      if (!skuAggr[pid]) {
-        skuAggr[pid] = { total_sold: 0, visitSet: new Set(), by_user: {}, by_subregion: {} };
-      }
-      skuAggr[pid].total_sold += item.sold;
-      skuAggr[pid].visitSet.add(visit.id);
-      if (visit.user_id) {
-        skuAggr[pid].by_user[visit.user_id] = (skuAggr[pid].by_user[visit.user_id] || 0) + item.sold;
-      }
-      if (visit.subregion_id) {
-        skuAggr[pid].by_subregion[visit.subregion_id] = (skuAggr[pid].by_subregion[visit.subregion_id] || 0) + item.sold;
-      }
-    });
-  });
+  while (true) {
+    let visitsQ = adminSupabase
+      .from('visits')
+      .select('id, user_id, subregion_id')
+      .eq('visit_type', 'sales')
+      .gte('created_at', start)
+      .lt('created_at', end)
+      .order('created_at', { ascending: true })
+      .range(vPage * V_PAGE, (vPage + 1) * V_PAGE - 1);
 
-  // ── 6. Build result array ───────────────────────────────────────────────
+    if (user_id)      visitsQ = visitsQ.eq('user_id', user_id);
+    if (subregion_id) visitsQ = visitsQ.eq('subregion_id', parseInt(subregion_id));
+    if (effectiveRegionIds.length > 0) visitsQ = visitsQ.in('region_id', effectiveRegionIds);
+
+    const { data: vChunk, error: vErr } = await visitsQ;
+    if (vErr) return res.status(500).json({ error: vErr.message });
+    if (!vChunk || vChunk.length === 0) break;
+
+    vChunk.forEach(v => { visitMap[v.id] = v; });
+
+    // ── 1b. Fetch ALL visit_items for this batch (paginated by result row) ─
+    const batchVisitIds = vChunk.map(v => v.id);
+    if (batchVisitIds.length > 0) {
+      const I_PAGE = 1000;
+      let iPage = 0;
+      while (true) {
+        const { data: iChunk, error: iErr } = await adminSupabase
+          .from('visit_items')
+          .select('visit_id, product_id, sold')
+          .in('visit_id', batchVisitIds)
+          .order('visit_id', { ascending: true })
+          .range(iPage * I_PAGE, (iPage + 1) * I_PAGE - 1);
+        if (iErr) return res.status(500).json({ error: iErr.message });
+        if (!iChunk || iChunk.length === 0) break;
+
+        iChunk.forEach(item => {
+          const sold = typeof item.sold === 'number' ? item.sold : 0;
+          if (sold <= 0) return;
+
+          const visit = visitMap[item.visit_id];
+          if (!visit) return;
+
+          const pid = item.product_id;
+          if (!skuAggr[pid]) {
+            skuAggr[pid] = { total_sold: 0, visitSet: new Set(), by_user: {}, by_subregion: {} };
+          }
+          skuAggr[pid].total_sold += sold;
+          skuAggr[pid].visitSet.add(visit.id);
+
+          if (visit.user_id) {
+            skuAggr[pid].by_user[visit.user_id] = (skuAggr[pid].by_user[visit.user_id] || 0) + sold;
+          }
+          if (visit.subregion_id) {
+            skuAggr[pid].by_subregion[visit.subregion_id] = (skuAggr[pid].by_subregion[visit.subregion_id] || 0) + sold;
+          }
+        });
+
+        if (iChunk.length < I_PAGE) break;
+        iPage++;
+      }
+    }
+
+    if (vChunk.length < V_PAGE) break;
+    vPage++;
+  }
+
+  if (Object.keys(skuAggr).length === 0) return res.status(200).json([]);
+
+  // ── 2. Fetch lookup tables only for IDs we actually need ────────────────
+  const productIds   = Object.keys(skuAggr).map(Number);
+  const userIds      = [...new Set(Object.values(skuAggr).flatMap(a => Object.keys(a.by_user)))];
+  const subregionIds = [...new Set(Object.values(skuAggr).flatMap(a => Object.keys(a.by_subregion).map(Number)))];
+
+  const [productsRes, usersRes, subregionsRes] = await Promise.all([
+    productIds.length > 0
+      ? adminSupabase.from('products').select('id, sku, name').in('id', productIds)
+      : Promise.resolve({ data: [] }),
+    userIds.length > 0
+      ? adminSupabase.from('app_users').select('id, full_name, email').in('id', userIds)
+      : Promise.resolve({ data: [] }),
+    subregionIds.length > 0
+      ? adminSupabase.from('subregions').select('id, name').in('id', subregionIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const productMap = {};
+  (productsRes.data || []).forEach(p => { productMap[p.id] = p; });
+  const userMap = {};
+  (usersRes.data || []).forEach(u => { userMap[u.id] = u.full_name || u.email; });
+  const subregionMap = {};
+  (subregionsRes.data || []).forEach(s => { subregionMap[s.id] = s.name; });
+
+  // ── 3. Build result array ───────────────────────────────────────────────
   const result = Object.entries(skuAggr).map(([pid, agg]) => {
     const product = productMap[parseInt(pid)];
     return {
-      product_id:   parseInt(pid),
-      sku:          product?.sku  || `#${pid}`,
-      name:         product?.name || 'Unknown',
-      total_sold:   agg.total_sold,
-      visits_count: agg.visitSet.size,
+      product_id:     parseInt(pid),
+      sku:            product?.sku  || `#${pid}`,
+      name:           product?.name || 'Unknown',
+      total_sold:     agg.total_sold,
+      visits_count:   agg.visitSet.size,
       by_salesperson: Object.entries(agg.by_user)
         .map(([uid, sold]) => ({ user_id: uid, full_name: userMap[uid] || uid, sold }))
         .sort((a, b) => b.sold - a.sold),

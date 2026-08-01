@@ -4016,6 +4016,7 @@ function MapTab({ token, primary, accent, regionFilter }) {
     });
   }, [satellite, mapReady]);
 
+  // ── Marker rendering ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapReady || typeof window === 'undefined') return;
 
@@ -4033,22 +4034,75 @@ function MapTab({ token, primary, accent, regionFilter }) {
 
       displayList.forEach(m => {
         const isUnvisited = m.type === 'unvisited';
-        const color = isUnvisited ? '#374151'
-          : m.type === 'sold'    ? '#16a34a'
-          : m.type === 'uplift'  ? '#d97706'
-          : '#dc2626';
-        const emoji = isUnvisited ? ''
-          : m.type === 'sold'   ? '🟢'
-          : m.type === 'uplift' ? '🟡'
-          : '🔴';
+
+        // Determine the base color and extra styling based on showAllShops
+        let bgColor, borderColor, dotColor, emoji;
+
+        if (showAllShops) {
+          // ── Show‑all‑shops mode ──
+          if (isUnvisited) {
+            bgColor = '#374151';
+            borderColor = '#1f2937';
+            dotColor = '#374151';
+            emoji = '';
+          } else {
+            // Visited shops: white circle with colored border and a small inner dot
+            bgColor = '#ffffff';
+            // border color based on type
+            if (m.type === 'sold') borderColor = '#16a34a';
+            else if (m.type === 'uplift') borderColor = '#d97706';
+            else borderColor = '#dc2626'; // not_sold
+            dotColor = borderColor;
+            emoji = ''; // we could add a small dot inside via HTML
+          }
+        } else {
+          // ── Normal mode ──
+          if (isUnvisited) {
+            bgColor = '#374151';
+            borderColor = '#1f2937';
+            dotColor = '#374151';
+            emoji = '';
+          } else {
+            if (m.type === 'sold') {
+              bgColor = '#16a34a';
+              borderColor = '#16a34a';
+              dotColor = '#16a34a';
+              emoji = '🟢';
+            } else if (m.type === 'uplift') {
+              bgColor = '#d97706';
+              borderColor = '#d97706';
+              dotColor = '#d97706';
+              emoji = '🟡';
+            } else {
+              bgColor = '#dc2626';
+              borderColor = '#dc2626';
+              dotColor = '#dc2626';
+              emoji = '🔴';
+            }
+          }
+        }
+
+        // Build icon HTML
+        let iconHtml;
+        if (isUnvisited) {
+          iconHtml = `<div style="width:26px;height:26px;border-radius:50%;background:${bgColor};border:2.5px solid ${borderColor};box-shadow:0 1px 6px rgba(0,0,0,0.4);cursor:pointer;opacity:0.7;"></div>`;
+        } else {
+          if (showAllShops) {
+            // White circle with coloured border and small coloured dot in centre
+            iconHtml = `<div style="width:34px;height:34px;border-radius:50%;background:${bgColor};border:3px solid ${borderColor};box-shadow:0 2px 8px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .15s;">
+              <div style="width:10px;height:10px;border-radius:50%;background:${dotColor};"></div>
+            </div>`;
+          } else {
+            // Normal coloured circle with emoji
+            iconHtml = `<div style="width:34px;height:34px;border-radius:50%;background:${bgColor};border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer;transition:transform .15s;">${emoji}</div>`;
+          }
+        }
 
         const icon = L.divIcon({
           className: '',
-          html: isUnvisited
-            ? `<div style="width:26px;height:26px;border-radius:50%;background:#374151;border:2.5px solid rgba(255,255,255,0.9);box-shadow:0 1px 6px rgba(0,0,0,0.4);cursor:pointer;opacity:0.7;"></div>`
-            : `<div style="width:34px;height:34px;border-radius:50%;background:${color};border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer;transition:transform .15s;">${emoji}</div>`,
-          iconSize:    isUnvisited ? [26, 26] : [34, 34],
-          iconAnchor:  isUnvisited ? [13, 13] : [17, 17],
+          html: iconHtml,
+          iconSize: isUnvisited ? [26, 26] : [34, 34],
+          iconAnchor: isUnvisited ? [13, 13] : [17, 17],
           popupAnchor: [0, -16],
         });
 
@@ -4057,8 +4111,10 @@ function MapTab({ token, primary, accent, regionFilter }) {
           hour: '2-digit', minute: '2-digit',
         });
 
+        // Build popup content
+        let popupHtml;
         if (m.type === 'unvisited') {
-          const popupHtml = `
+          popupHtml = `
             <div style="width:230px;font-family:system-ui,sans-serif;font-size:0.82rem;padding:2px 0">
               <div style="font-weight:700;font-size:0.94rem;color:#1e293b;margin-bottom:3px">${m.shop_name}</div>
               ${m.shop_location ? `<div style="font-size:0.7rem;color:#64748b;margin-bottom:6px;display:flex;align-items:center;gap:3px">📍 ${m.shop_location}</div>` : ''}
@@ -4067,25 +4123,62 @@ function MapTab({ token, primary, accent, regionFilter }) {
                 <a href="https://www.google.com/maps?q=&layer=c&cbll=${m.latitude},${m.longitude}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:4px 12px;background:#1a73e8;color:#fff;border-radius:6px;font-size:0.72rem;font-weight:700;text-decoration:none">🗣 Street View</a>
               </div>
             </div>`;
-          const lMarker = L.marker([m.latitude, m.longitude], { icon })
-            .addTo(leafletMapRef.current);
-          lMarker.on('click', () => setActiveMarker(m));
-          markersRef.current.push(lMarker);
-          bounds.push([m.latitude, m.longitude]);
-          return;
+        } else {
+          // Popup for visited / uplift
+          const color = showAllShops ? (m.type === 'sold' ? '#16a34a' : m.type === 'uplift' ? '#d97706' : '#dc2626') :
+            (m.type === 'sold' ? '#16a34a' : m.type === 'uplift' ? '#d97706' : '#dc2626');
+          const label = m.type === 'sold' ? '✅ Sold' : m.type === 'uplift' ? `📦 Uplift${m.uplift_status ? ' · ' + m.uplift_status : ''}` : '❌ Not Sold';
+          const skuText = m.type === 'not_sold'
+            ? (m.not_sold_reason ? `Reason: ${m.not_sold_reason}` : 'Reason not recorded')
+            : (m.skus || [])
+              .filter(s => {
+                if (m.type === 'sold')   return s.sold > 0;
+                if (m.type === 'uplift') return s.cartons_uplifted > 0;
+                return true;
+              })
+              .map(s =>
+                m.type === 'uplift'
+                  ? `${s.sku}: ${s.cartons_uplifted} ctn uplifted`
+                  : `${s.sku}: ${s.sold} ctn sold`
+              ).join('<br>');
+
+          const selfieImg = m.selfie_url
+            ? `<img src="${m.selfie_url}" style="width:100%;max-height:160px;object-fit:contain;background:#f1f5f9;border-radius:6px;margin-bottom:6px;display:block;"><br>`
+            : '';
+
+          popupHtml = `
+            ${selfieImg}
+            <b>${m.shop_name}</b><br>
+            ${m.shop_location || ''}<br>
+            <span style="color:${color}">${label}</span><br>
+            👤 ${m.salesperson_name}<br>
+            🕒 ${fmtDate(m.visited_at)}<br><hr>
+            ${skuText}
+            ${m.type === 'sold' ? `<br><b>Total: ${m.total_sold} ctn</b>` : ''}
+            ${m.type === 'uplift' ? `<br><b>Total uplifted: ${m.total_uplifted} ctn</b>` : ''}
+            ${m.rejected_reason ? `<br><span style="color:#dc2626;font-weight:600">❌ Rejection reason: ${m.rejected_reason}</span>` : ''}
+            <br><a href="https://www.google.com/maps?q=&layer=c&cbll=${m.latitude},${m.longitude}" target="_blank" style="display:inline-block;margin-top:6px;font-size:11px;color:#2563eb;font-weight:600;text-decoration:none">📍 Street View</a>
+          `.trim();
         }
 
         const lMarker = L.marker([m.latitude, m.longitude], { icon })
           .addTo(leafletMapRef.current);
 
-        lMarker.on('click', () => {
-          setActiveMarker(m);
-          if (m.selfie_path) {
-            loadSelfie(m.selfie_path);
-          } else {
-            setSelfieUrl(null);
-          }
-        });
+        lMarker.bindPopup(popupHtml, { maxWidth: 320 });
+
+        if (m.type !== 'unvisited') {
+          lMarker.on('click', () => {
+            setActiveMarker(m);
+            if (m.selfie_path) {
+              loadSelfie(m.selfie_path);
+            } else {
+              setSelfieUrl(null);
+            }
+          });
+        } else {
+          lMarker.on('click', () => setActiveMarker(m));
+        }
+
         markersRef.current.push(lMarker);
         bounds.push([m.latitude, m.longitude]);
       });
@@ -4094,7 +4187,7 @@ function MapTab({ token, primary, accent, regionFilter }) {
         leafletMapRef.current.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
       }
     });
-  }, [markers, mapReady, showOnlyUnvisited]);
+  }, [markers, mapReady, showOnlyUnvisited, showAllShops]); // <-- added showAllShops as dependency
 
   const fetchData = useCallback(async () => {
     setLoading(true); setError(''); setActiveMarker(null); setShowOnlyUnvisited(false);
