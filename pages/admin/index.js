@@ -11,7 +11,7 @@ import MapFullscreenModal from '../../components/MapFullscreenModal';
 
 // ── Module-level caches (persist across tab switches) ────────────────────────
 const _perfCache   = { token: null, key: null, data: null, users: null, subregions: null };
-const _custCache   = { key: null, data: null, subregions: null };
+const _custCache   = { key: null, data: null, subregions: null, periodCartons: null, periodVisits: null, periodShops: null };
 const _skuCache    = { key: null, data: null };
 const _stkCache    = { key: null, data: null };
 const _rnsCache    = { key: null, data: null };
@@ -857,6 +857,7 @@ function TargetsTab({ token, primary, branding, readOnly, regionFilter }) {
         headers: { Authorization: `Bearer ${token}` },
       });
       const lim = r.headers.get('X-Data-Limited') === 'true';
+      const rawCartons = r.headers.get('X-Total-Cartons');
       const d = await r.json();
       if (!r.ok) { setError(d.error || 'Failed to load'); return; }
       setLimited(lim);
@@ -1243,6 +1244,10 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
   const [rnsDateFrom,    setRnsDateFrom]    = useState(`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`);
   const [rnsDateTo,      setRnsDateTo]      = useState((() => { const d = new Date(now.getFullYear(), now.getMonth()+1, 0); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })());
   const [rnsRows,        setRnsRows]        = useState([]);
+  const [rnsSummaryRows, setRnsSummaryRows] = useState([]);
+  const [rnsDetailRows,  setRnsDetailRows]  = useState([]);
+  const [rnsDetailReason, setRnsDetailReason] = useState('');
+  const [rnsFilterMode,  setRnsFilterMode]  = useState('month');
   const [rnsLoading,     setRnsLoading]     = useState(false);
   const [rnsError,       setRnsError]       = useState('');
   const [rnsLimited,     setRnsLimited]     = useState(false);
@@ -1662,10 +1667,31 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
     return () => clearTimeout(stkDebounceRef.current);
   }, [token, stkRegionId, stkSubregionId]);
 
+  const normalizeRnsPayload = (d) => {
+    if (!d || typeof d !== 'object') return { summaryRows: [], detailRows: [] };
+    if (Array.isArray(d)) {
+      const summaryRows = d.length > 0 && d.every(item => item && typeof item === 'object' && typeof item.count === 'number' && typeof item.reason === 'string')
+        ? d
+        : [];
+      const detailRows = summaryRows.length > 0
+        ? summaryRows.flatMap(item => item.rows || [])
+        : d.filter(item => item && typeof item === 'object' && item.visit_id);
+      return { summaryRows, detailRows };
+    }
+
+    const summaryRows = Array.isArray(d.summary_rows) ? d.summary_rows : [];
+    const detailRows = Array.isArray(d.detail_rows)
+      ? d.detail_rows
+      : summaryRows.flatMap(item => item.rows || []);
+    return { summaryRows, detailRows };
+  };
+
   const loadRnsData = async (page = 1) => {
-    const rnsKey = `${token}:${rnsRegionId}:${rnsSubregionId}:${rnsUserId}:${rnsYear}:${rnsMonth}:${rnsDateFrom}:${rnsDateTo}:${page}:${RNS_PAGE_SIZE}`;
+    const rnsKey = `${token}:${rnsRegionId}:${rnsSubregionId}:${rnsUserId}:${rnsFilterMode}:${rnsYear}:${rnsMonth}:${rnsDateFrom}:${rnsDateTo}:${page}:${RNS_PAGE_SIZE}`;
     if (_rnsCache.key === rnsKey && _rnsCache.data) {
-      setRnsRows(_rnsCache.data);
+      const payload = normalizeRnsPayload(_rnsCache.data);
+      setRnsSummaryRows(payload.summaryRows);
+      setRnsRows(payload.detailRows);
       setRnsLimited(_rnsCache.limited || false);
       setRnsMeta(_rnsCache.meta || { total: 0, topReason: '', topRegion: '', totalPages: 1, page: 1 });
       setRnsPage(page);
@@ -1679,10 +1705,18 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
       if (rnsRegionId)    params.set('region_id',    rnsRegionId);
       if (rnsSubregionId) params.set('subregion_id', rnsSubregionId);
       if (rnsUserId)      params.set('user_id',      rnsUserId);
-      if (rnsDateFrom)    params.set('date_from',   rnsDateFrom);
-      if (rnsDateTo)      params.set('date_to',     rnsDateTo);
-      if (rnsYear)        params.set('year',        rnsYear);
-      if (rnsMonth)       params.set('month',       rnsMonth);
+      if (rnsFilterMode === 'range') {
+        params.set('filter_mode', 'range');
+        if (rnsDateFrom) params.set('date_from', rnsDateFrom);
+        if (rnsDateTo)   params.set('date_to',   rnsDateTo);
+      } else {
+        params.set('filter_mode', 'month');
+        const isDefaultMonth = String(rnsYear) === String(now.getFullYear()) && String(rnsMonth) === String(now.getMonth() + 1);
+        if (!isDefaultMonth) {
+          params.set('year', rnsYear);
+          params.set('month', rnsMonth);
+        }
+      }
       const r = await fetch(`/api/admin/reasons-not-sold?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1694,8 +1728,11 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
       const d = await r.json();
       if (!r.ok) { setRnsError(d.error || 'Failed to load'); return; }
       const meta = { total, topReason, topRegion, totalPages, page };
+      const payload = normalizeRnsPayload(d);
       _rnsCache.key = rnsKey; _rnsCache.data = d; _rnsCache.limited = limited; _rnsCache.meta = meta;
-      setRnsRows(d); setRnsLimited(limited); setRnsMeta(meta); setRnsPage(page);
+      setRnsSummaryRows(payload.summaryRows);
+      setRnsRows(payload.detailRows);
+      setRnsLimited(limited); setRnsMeta(meta); setRnsPage(page);
     } catch { setRnsError('Network error.'); }
     finally { setRnsLoading(false); }
   };
@@ -1705,10 +1742,11 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
     clearTimeout(rnsDebounceRef.current);
     rnsDebounceRef.current = setTimeout(() => { loadRnsData(1); }, 400);
     return () => clearTimeout(rnsDebounceRef.current);
-  }, [token, rnsRegionId, rnsSubregionId, rnsUserId, rnsYear, rnsMonth, rnsDateFrom, rnsDateTo]);
+  }, [token, rnsRegionId, rnsSubregionId, rnsUserId, rnsYear, rnsMonth, rnsDateFrom, rnsDateTo, rnsFilterMode]);
 
-  const exportRnsExcel = async () => {
-    if (!rnsRows.length) return;
+  const exportRnsExcel = async (rowsToExport = rnsDetailRows, reasonLabel = rnsDetailReason) => {
+    const exportRows = Array.isArray(rowsToExport) ? rowsToExport : [];
+    if (!exportRows.length) return;
     const ExcelJS = (await import('exceljs')).default;
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Sprint App';
@@ -1728,7 +1766,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
 
     ws.mergeCells('A1:F1');
     const titleCell = ws.getCell('A1');
-    titleCell.value = `${companyName} — Reasons Not Sold`;
+    titleCell.value = reasonLabel ? `${companyName} — ${reasonLabel}` : `${companyName} — Reasons Not Sold`;
     titleCell.font  = { bold: true, size: 15, color: { argb: `FF${themeHex}` } };
     titleCell.alignment = { horizontal: 'center' };
     ws.getRow(1).height = 28;
@@ -1752,7 +1790,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
     });
     headerRow.height = 22;
 
-    rnsRows.forEach((row, i) => {
+    exportRows.forEach((row, i) => {
       const dr = ws.addRow([
         i + 1,
         row.shop_name + (row.shop_location ? ` (${row.shop_location})` : ''),
@@ -1778,7 +1816,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
     const buf = await wb.xlsx.writeBuffer();
     const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     const a   = document.createElement('a');
-    a.href = url; a.download = `reasons-not-sold-${periodLabel.replace(/\s/g, '-')}.xlsx`;
+    a.href = url; a.download = `reasons-not-sold-${(reasonLabel || 'all').replace(/\s+/g, '-').toLowerCase()}.xlsx`;
     a.click(); URL.revokeObjectURL(url);
   };
 
@@ -2095,7 +2133,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
                 <th className={styles.perfThNum}>Shops Not Sold</th>
                 <th className={styles.perfThNum}>Cartons Sold</th>
                 <th className={styles.perfThNum}>Target</th>
-                <th style={{ minWidth: 200 }}>Performance</th>
+                <th style={{ minWidth: 160 }}>Performance</th>
               </tr>
             </thead>
             <tbody>
@@ -2160,7 +2198,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
                         ? <>{row.cartons_target.toLocaleString()} <span style={{ color: '#94a3b8', fontSize: '0.72rem' }}>ctn</span></>
                         : <span style={{ color: '#cbd5e1' }}>— not set</span>}
                     </td>
-                    <td style={{ padding: '14px 16px' }}>
+                    <td style={{ padding: '14px 10px' }}>
                       <div className={styles.perfBarRow}>
                         <div className={styles.perfBarTrack}>
                           <div
@@ -2753,6 +2791,28 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
                 </button>
               ))}
             </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                onClick={() => { setRnsFilterMode('month'); setRnsDateFrom(''); setRnsDateTo(''); _rnsCache.key = null; }}
+                style={{
+                  padding: '6px 12px', borderRadius: 10, border: '1px solid #e2e8f0',
+                  background: rnsFilterMode === 'month' ? primary : '#fff', color: rnsFilterMode === 'month' ? '#fff' : '#475569',
+                  fontWeight: 700, fontSize: '0.77rem', cursor: 'pointer',
+                }}
+              >
+                📅 Month
+              </button>
+              <button
+                onClick={() => { setRnsFilterMode('range'); _rnsCache.key = null; }}
+                style={{
+                  padding: '6px 12px', borderRadius: 10, border: '1px solid #e2e8f0',
+                  background: rnsFilterMode === 'range' ? primary : '#fff', color: rnsFilterMode === 'range' ? '#fff' : '#475569',
+                  fontWeight: 700, fontSize: '0.77rem', cursor: 'pointer',
+                }}
+              >
+                📆 Custom Range
+              </button>
+            </div>
             <button
               className={styles.perfRefreshBtn}
               style={{ background: primary }}
@@ -2765,7 +2825,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
               className={styles.perfRefreshBtn}
               style={{ background: '#0f172a' }}
               onClick={() => setRnsPreviewOpen(true)}
-              disabled={rnsRows.length === 0}
+              disabled={rnsSummaryRows.length === 0 && rnsRows.length === 0}
             >
               📄 Preview Report
             </button>
@@ -2776,14 +2836,14 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
           <select
             className={styles.perfSelect}
             value={rnsYear}
-            onChange={e => { const y = parseInt(e.target.value), m = parseInt(rnsMonth); setRnsYear(String(y)); setRnsDateFrom(`${String(y)}-${String(m).padStart(2,'0')}-01`); const ld = new Date(y, m, 0); setRnsDateTo(`${ld.getFullYear()}-${String(ld.getMonth()+1).padStart(2,'0')}-${String(ld.getDate()).padStart(2,'0')}`); _rnsCache.key = null; }}
+            onChange={e => { const y = parseInt(e.target.value), m = parseInt(rnsMonth); setRnsFilterMode('month'); setRnsYear(String(y)); setRnsDateFrom(''); setRnsDateTo(''); _rnsCache.key = null; }}
           >
             {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
           </select>
           <select
             className={styles.perfSelect}
             value={rnsMonth}
-            onChange={e => { const m = parseInt(e.target.value), y = parseInt(rnsYear); setRnsMonth(String(m)); setRnsDateFrom(`${String(y)}-${String(m).padStart(2,'0')}-01`); const ld = new Date(y, m, 0); setRnsDateTo(`${ld.getFullYear()}-${String(ld.getMonth()+1).padStart(2,'0')}-${String(ld.getDate()).padStart(2,'0')}`); _rnsCache.key = null; }}
+            onChange={e => { const m = parseInt(e.target.value), y = parseInt(rnsYear); setRnsFilterMode('month'); setRnsMonth(String(m)); setRnsDateFrom(''); setRnsDateTo(''); _rnsCache.key = null; }}
           >
             {MONTHS.map((m, i) => <option key={i + 1} value={String(i + 1)}>{m}</option>)}
           </select>
@@ -2815,7 +2875,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
             type="date"
             className={styles.perfSelect}
             value={rnsDateFrom}
-            onChange={e => { setRnsDateFrom(e.target.value); _rnsCache.key = null; }}
+            onChange={e => { setRnsFilterMode('range'); setRnsDateFrom(e.target.value); _rnsCache.key = null; }}
             style={{ minWidth: 132 }}
             title="Custom date from (overrides month)"
           />
@@ -2823,7 +2883,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
             type="date"
             className={styles.perfSelect}
             value={rnsDateTo}
-            onChange={e => { setRnsDateTo(e.target.value); _rnsCache.key = null; }}
+            onChange={e => { setRnsFilterMode('range'); setRnsDateTo(e.target.value); _rnsCache.key = null; }}
             style={{ minWidth: 132 }}
             title="Custom date to (overrides month)"
           />
@@ -2831,7 +2891,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
             <button
               className={styles.perfRefreshBtn}
               style={{ background: '#64748b', fontSize: '0.75rem' }}
-              onClick={() => { const m = parseInt(rnsMonth), y = parseInt(rnsYear); setRnsRegionId(''); setRnsSubregionId(''); setRnsUserId(''); setRnsDateFrom(`${String(y)}-${String(m).padStart(2,'0')}-01`); const ld = new Date(y, m, 0); setRnsDateTo(`${ld.getFullYear()}-${String(ld.getMonth()+1).padStart(2,'0')}-${String(ld.getDate()).padStart(2,'0')}`); _rnsCache.key = null; }}
+              onClick={() => { const currentYear = String(now.getFullYear()); const currentMonth = String(now.getMonth() + 1); setRnsFilterMode('month'); setRnsRegionId(''); setRnsSubregionId(''); setRnsUserId(''); setRnsYear(currentYear); setRnsMonth(currentMonth); setRnsDateFrom(''); setRnsDateTo(''); _rnsCache.key = null; }}
             >
               ✕ Clear
             </button>
@@ -2881,15 +2941,13 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
           </div>
         )}
 
-        {!rnsLoading && rnsRows.length > 0 && rnsView === 'list' && (() => {
-          const pageRows = rnsRows;
-          const totalPages = Math.max(1, rnsMeta.totalPages || 1);
+        {!rnsLoading && rnsSummaryRows.length > 0 && rnsView === 'list' && (() => {
           return (
             <div style={{ overflowX: 'auto', borderRadius: 14, border: '1px solid #e2e8f0', boxShadow: '0 1px 6px rgba(0,0,0,0.04)' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }}>
                 <thead>
                   <tr style={{ background: '#f8fafc' }}>
-                    {['#', 'Shop', 'Subregion', 'Salesperson', 'Visit Date', 'Reason Not Sold'].map((h, i) => (
+                    {['#', 'Reason', 'Count'].map((h, i) => (
                       <th key={h} style={{
                         padding: '11px 14px',
                         textAlign: i === 0 ? 'center' : 'left',
@@ -2904,85 +2962,39 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {pageRows.map((row, idx) => {
-                    const globalIdx = (rnsPage - 1) * RNS_PAGE_SIZE + idx + 1;
-                    return (
-                      <tr
-                        key={row.visit_id}
-                        style={{ background: idx % 2 === 0 ? '#fff' : '#fafbfc', transition: 'background 0.1s' }}
-                        onMouseEnter={e => { e.currentTarget.style.background = '#f1f5f9'; }}
-                        onMouseLeave={e => { e.currentTarget.style.background = idx % 2 === 0 ? '#fff' : '#fafbfc'; }}
-                      >
-                        <td style={{ padding: '10px 14px', textAlign: 'center', color: '#94a3b8', fontSize: '0.75rem', borderBottom: '1px solid #f1f5f9', fontWeight: 600 }}>
-                          {globalIdx}
-                        </td>
-                        <td style={{ padding: '10px 14px', fontWeight: 700, color: '#0f172a', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
-                          {row.shop_name}
-                          {row.shop_location && (
-                            <div style={{ fontWeight: 400, fontSize: '0.72rem', color: '#94a3b8', marginTop: 1 }}>📍 {row.shop_location}</div>
-                          )}
-                        </td>
-                        <td style={{ padding: '10px 14px', color: '#475569', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
-                          {row.subregion_name || '—'}
-                        </td>
-                        <td style={{ padding: '10px 14px', color: '#334155', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                            <div style={{
-                              width: 28, height: 28, borderRadius: '50%', background: primary, color: '#fff',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              fontWeight: 700, fontSize: '0.75rem', flexShrink: 0,
-                            }}>
-                              {(row.salesperson_name || 'S').charAt(0).toUpperCase()}
-                            </div>
-                            {row.salesperson_name}
-                          </div>
-                        </td>
-                        <td style={{ padding: '10px 14px', color: '#475569', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap', fontSize: '0.78rem' }}>
-                          {new Date(row.visited_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                        </td>
-                        <td style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9' }}>
-                          <span style={{
-                            display: 'inline-block', padding: '3px 12px', borderRadius: 20,
-                            background: '#fff1f2', color: '#be123c',
-                            fontWeight: 600, fontSize: '0.78rem', whiteSpace: 'nowrap',
-                          }}>
-                            {row.reason}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {rnsSummaryRows.map((row, idx) => (
+                    <tr
+                      key={row.reason}
+                      style={{ background: idx % 2 === 0 ? '#fff' : '#fafbfc', transition: 'background 0.1s' }}
+                      onMouseEnter={e => { e.currentTarget.style.background = '#f1f5f9'; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = idx % 2 === 0 ? '#fff' : '#fafbfc'; }}
+                    >
+                      <td style={{ padding: '10px 14px', textAlign: 'center', color: '#94a3b8', fontSize: '0.75rem', borderBottom: '1px solid #f1f5f9', fontWeight: 600 }}>
+                        {idx + 1}
+                      </td>
+                      <td style={{ padding: '10px 14px', fontWeight: 700, color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>
+                        {row.reason}
+                      </td>
+                      <td style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9' }}>
+                        <button
+                          onClick={() => {
+                            setRnsDetailReason(row.reason);
+                            setRnsDetailRows(row.rows || []);
+                            setRnsPreviewOpen(true);
+                          }}
+                          style={{
+                            border: 'none', borderRadius: 999, padding: '6px 12px',
+                            background: '#fee2e2', color: '#991b1b', fontWeight: 700,
+                            cursor: 'pointer', minWidth: 44,
+                          }}
+                        >
+                          {row.count}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
-              {totalPages > 1 && (
-                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, padding: '12px 16px', borderTop: '1px solid #f1f5f9' }}>
-                  <button
-                    onClick={() => {
-                      const nextPage = Math.max(1, rnsPage - 1);
-                      setRnsPage(nextPage);
-                      loadRnsData(nextPage);
-                    }}
-                    disabled={rnsPage === 1}
-                    style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: rnsPage === 1 ? '#f8fafc' : '#fff', color: rnsPage === 1 ? '#cbd5e1' : '#475569', fontWeight: 700, cursor: rnsPage === 1 ? 'default' : 'pointer', fontSize: '0.8rem' }}
-                  >
-                    ‹ Prev
-                  </button>
-                  <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>
-                    Page {rnsPage} of {totalPages}
-                  </span>
-                  <button
-                    onClick={() => {
-                      const nextPage = Math.min(totalPages, rnsPage + 1);
-                      setRnsPage(nextPage);
-                      loadRnsData(nextPage);
-                    }}
-                    disabled={rnsPage === totalPages}
-                    style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: rnsPage === totalPages ? '#f8fafc' : '#fff', color: rnsPage === totalPages ? '#cbd5e1' : '#475569', fontWeight: 700, cursor: rnsPage === totalPages ? 'default' : 'pointer', fontSize: '0.8rem' }}
-                  >
-                    Next ›
-                  </button>
-                </div>
-              )}
             </div>
           );
         })()}
@@ -3068,15 +3080,19 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
 
         <ReportPreviewModal
           open={rnsPreviewOpen}
-          onClose={() => setRnsPreviewOpen(false)}
-          title="Reasons Not Sold"
+          onClose={() => {
+            setRnsPreviewOpen(false);
+            setRnsDetailReason('');
+            setRnsDetailRows([]);
+          }}
+          title={rnsDetailReason ? `Reason: ${rnsDetailReason}` : 'Reasons Not Sold'}
           subtitle={
             rnsDateFrom || rnsDateTo
               ? `${rnsDateFrom || '…'} → ${rnsDateTo || '…'}`
               : `${MONTHS[parseInt(rnsMonth) - 1]} ${rnsYear}`
           }
           headers={['#', 'Shop', 'Subregion', 'Salesperson', 'Visit Date', 'Reason Not Sold']}
-          rows={rnsRows.map((r, i) => [
+          rows={(rnsDetailRows.length ? rnsDetailRows : rnsRows).map((r, i) => [
             i + 1,
             r.shop_name + (r.shop_location ? ` — ${r.shop_location}` : ''),
             r.subregion_name || '—',
@@ -3084,7 +3100,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
             new Date(r.visited_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
             r.reason,
           ])}
-          onExport={exportRnsExcel}
+          onExport={() => exportRnsExcel(rnsDetailRows.length ? rnsDetailRows : rnsRows, rnsDetailReason || undefined)}
         />
       </div>
     </div>
@@ -3114,7 +3130,10 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
   const [loading,     setLoading]     = useState(false);
   const [error,       setError]       = useState('');
   const [expandedRow, setExpandedRow] = useState(null);
-  const [limited,     setLimited]     = useState(false);
+  const [limited,       setLimited]       = useState(false);
+  const [periodCartons, setPeriodCartons] = useState(null);
+  const [periodVisits,  setPeriodVisits]  = useState(null);
+  const [periodShops,   setPeriodShops]   = useState(null);
   const [custPreviewOpen, setCustPreviewOpen] = useState(false);
   const [custStockVisible, setCustStockVisible] = useState(10);
   const [custShopSearch,   setCustShopSearch]   = useState('');
@@ -3157,6 +3176,9 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
     if (_custCache.key === cacheKey && _custCache.data) {
       setRows(_custCache.data);
       setLimited(_custCache.limited || false);
+      if (_custCache.periodCartons !== null) setPeriodCartons(_custCache.periodCartons);
+      if (_custCache.periodVisits !== null) setPeriodVisits(_custCache.periodVisits);
+      if (_custCache.periodShops !== null) setPeriodShops(_custCache.periodShops);
       return;
     }
     setLoading(true); setError(''); setExpandedRow(null); setStockDebug(null);
@@ -3174,6 +3196,9 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
         headers: { Authorization: `Bearer ${token}` },
       });
       const lim = r.headers.get('X-Data-Limited') === 'true';
+      const rawCartons = r.headers.get('X-Total-Cartons');
+      const rawVisits  = r.headers.get('X-Total-Visits');
+      const rawShops   = r.headers.get('X-Active-Shops');
       const d = await r.json();
       if (sec === 'stock') {
         window.__lastStockApi = d;
@@ -3189,8 +3214,14 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
       _custCache.key = cacheKey;
       _custCache.data = resultRows;
       _custCache.limited = lim;
+      if (rawCartons !== null) _custCache.periodCartons = parseInt(rawCartons, 10);
+      if (rawVisits  !== null) _custCache.periodVisits  = parseInt(rawVisits, 10);
+      if (rawShops   !== null) _custCache.periodShops   = parseInt(rawShops, 10);
       setLimited(lim);
       setRows(resultRows);
+      if (rawCartons !== null) setPeriodCartons(parseInt(rawCartons, 10));
+      if (rawVisits  !== null) setPeriodVisits(parseInt(rawVisits, 10));
+      if (rawShops   !== null) setPeriodShops(parseInt(rawShops, 10));
       if (sec === 'stock') setCustStockVisible(10);
     } catch { setError('Network error. Please try again.'); setRows([]); }
     finally { setLoading(false); }
@@ -3499,17 +3530,17 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
           {section === 'sales' ? (
             <>
               <div className={styles.custSummaryItem}>
-                <span className={styles.custSummaryVal}>{rows.length}</span>
+                <span className={styles.custSummaryVal}>{(periodShops !== null ? periodShops : rows.length).toLocaleString()}</span>
                 <span className={styles.custSummaryLabel}>Active Shops</span>
               </div>
               <div className={styles.custSummaryDivider} />
               <div className={styles.custSummaryItem}>
-                <span className={styles.custSummaryVal}>{summary.totalVisits.toLocaleString()}</span>
+                <span className={styles.custSummaryVal}>{(periodVisits !== null ? periodVisits : summary.totalVisits).toLocaleString()}</span>
                 <span className={styles.custSummaryLabel}>Total Visits</span>
               </div>
               <div className={styles.custSummaryDivider} />
               <div className={styles.custSummaryItem}>
-                <span className={styles.custSummaryVal}>{summary.totalCartons.toLocaleString()}</span>
+                <span className={styles.custSummaryVal}>{(periodCartons !== null ? periodCartons : summary.totalCartons).toLocaleString()}</span>
                 <span className={styles.custSummaryLabel}>Cartons Sold</span>
               </div>
               <div className={styles.custSummaryDivider} />
@@ -3530,7 +3561,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
           ) : (
             <>
               <div className={styles.custSummaryItem}>
-                <span className={styles.custSummaryVal}>{rows.length}</span>
+                <span className={styles.custSummaryVal}>{rows.length.toLocaleString()}</span>
                 <span className={styles.custSummaryLabel}>Active Shops</span>
               </div>
               <div className={styles.custSummaryDivider} />
@@ -3830,7 +3861,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
         open={custPreviewOpen}
         onClose={() => setCustPreviewOpen(false)}
         title={section === 'sales' ? 'Customer Sales Analysis' : section === 'uplifts' ? 'Uplift Analysis' : 'Stock Positions'}
-        subtitle={`${MONTHS[parseInt(month) - 1]} ${year}`}
+        subtitle={dateFrom ? `${dateFrom}${dateTo ? ' → ' + dateTo : ''}` : `${MONTHS[parseInt(month) - 1]} ${year}`}
         headers={
           section === 'stock'
             ? ['Shop', 'Subregion', 'SKU', 'Product Name', 'Stock Position', 'Last Recorded']
@@ -4223,13 +4254,23 @@ function MapTab({ token, primary, accent, regionFilter }) {
         headers: { Authorization: `Bearer ${token}` },
       });
       const d = await r.json();
-      if (!r.ok) { setError(d.error || 'Failed to load map data'); setLoading(false); return; }
-      setMarkers(d);
-    } catch { setError('Network error.'); }
-    finally { setLoading(false); }
+      if (!r.ok) {
+        setError(d.error || 'Failed to load map data');
+        setMarkers([]);
+        return;
+      }
+      setMarkers(Array.isArray(d) ? d : []);
+    } catch {
+      setError('Network error.');
+      setMarkers([]);
+    } finally {
+      setLoading(false);
+    }
   }, [token, year, month, dateFrom, dateTo, regionId, subregionId, userId, showAllShops]);
 
-  useEffect(() => { if (token && mapReady) fetchData(); }, [token, mapReady]);
+  useEffect(() => {
+    if (token && mapReady) fetchData();
+  }, [token, mapReady, fetchData]);
 
   const handleExport = () => {
     const fmtDate = iso => new Date(iso).toLocaleString('en-GB', {

@@ -44,6 +44,8 @@ export default function MapFullscreenModal({ open, onClose, markers = [], filter
       return;
     }
 
+    if (typeof window === 'undefined') return;
+
     // Give React time to paint the container div before Leaflet queries it
     let mounted = true;
     const t = setTimeout(() => {
@@ -53,7 +55,9 @@ export default function MapFullscreenModal({ open, onClose, markers = [], filter
         if (!mounted || !mapRef.current || mapRef.current._leaflet_id) return;
 
         // Fix default icon paths broken by webpack bundling
-        delete L.Icon.Default.prototype._getIconUrl;
+        if (L.Icon?.Default) {
+          delete L.Icon.Default.prototype._getIconUrl;
+        }
         L.Icon.Default.mergeOptions({
           iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
           iconUrl:       'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
@@ -65,6 +69,8 @@ export default function MapFullscreenModal({ open, onClose, markers = [], filter
           zoom: 11,
           zoomControl: true,
         });
+
+        if (!map || typeof map.remove !== 'function') return;
 
         // CartoDB voyager tiles — clean, fast, no API key required
         tileLayerRef.current = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
@@ -92,6 +98,7 @@ export default function MapFullscreenModal({ open, onClose, markers = [], filter
   useEffect(() => {
     if (!mapReady || !leafletMapRef.current || !tileLayerRef.current) return;
     import('leaflet').then(L => {
+      if (!leafletMapRef.current || !tileLayerRef.current) return;
       // Remove existing base + label layers
       tileLayerRef.current.remove();
       if (labelLayerRef.current) { labelLayerRef.current.remove(); labelLayerRef.current = null; }

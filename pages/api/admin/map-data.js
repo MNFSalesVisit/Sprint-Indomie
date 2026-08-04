@@ -55,11 +55,7 @@ export default async function handler(req, res) {
     ? (region_id ? [parseInt(region_id)].filter(id => allowedRegionIds.includes(id)) : allowedRegionIds)
     : (region_id ? [parseInt(region_id)] : []);
 
-<<<<<<< HEAD
-  // ── 1. Fetch ALL visits in period (NO coordinate filter) ───────────────
-=======
-  // ── 1. Fetch visits (PAGINATED — no more 1,000-row silent truncation) ──
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
+  // ── 1. Fetch visits in paginated batches to avoid silent truncation ─────
   const visits = [];
   let vPage = 0;
   const V_PAGE = 1000;
@@ -70,11 +66,6 @@ export default async function handler(req, res) {
       .select('id, visit_type, latitude, longitude, selfie_path, created_at, shop_id, user_id')
       .gte('created_at', startIso)
       .lt('created_at', endIso)
-<<<<<<< HEAD
-=======
-      .not('latitude', 'is', null)
-      .not('longitude', 'is', null)
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
       .order('created_at', { ascending: false })
       .range(vPage * V_PAGE, (vPage + 1) * V_PAGE - 1);
 
@@ -115,11 +106,7 @@ export default async function handler(req, res) {
     if (validUpliftShopIds.size === 0) skipUplifts = true;
   }
 
-<<<<<<< HEAD
-  // ── 3. Fetch uplifts in period (paginated) ─────────────────────────────
-=======
-  // ── 3. Fetch uplifts (PAGINATED — no more 1,000-row silent truncation) ─
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
+  // ── 3. Fetch uplifts in paginated batches ─────────────────────────────
   const uplifts = [];
   if (!skipUplifts) {
     let uPage = 0;
@@ -156,6 +143,11 @@ export default async function handler(req, res) {
   visits.forEach(v => { if (v.shop_id) shopIds.add(v.shop_id); if (v.user_id) userIds.add(v.user_id); });
   uplifts.forEach(u => { if (u.shop_id) shopIds.add(u.shop_id); if (u.user_id) userIds.add(u.user_id); });
 
+  const normalizeCoordinate = value => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
+
   const shopIdsArr = Array.from(shopIds);
   const userIdsArr = Array.from(userIds);
 
@@ -173,11 +165,7 @@ export default async function handler(req, res) {
   const userMap = {};
   (usersRes.data || []).forEach(u => { userMap[u.id] = u; });
 
-<<<<<<< HEAD
-  // ── 5. Batch-fetch visit_items & uplift_items (paginated) ──────────────
-=======
-  // ── 5. Batch-fetch visit_items & uplift_items (PAGINATED) ──────────────
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
+  // ── 5. Batch-fetch visit_items & uplift_items in paginated batches ──
   const visitIds  = visits.map(v => v.id);
   const upliftIds = uplifts.map(u => u.id);
 
@@ -259,22 +247,14 @@ export default async function handler(req, res) {
   for (const v of visits) {
     const shop = v.shop_id ? shopMap[v.shop_id] : null;
 
-<<<<<<< HEAD
-    // Use visit GPS if available, otherwise fall back to shop's coordinates
-=======
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
-    const lat = v.latitude ?? shop?.latitude;
-    const lng = v.longitude ?? shop?.longitude;
-    if (!lat || !lng) continue;
+    // Use visit GPS if available, otherwise fall back to shop coordinates.
+    const lat = normalizeCoordinate(v.latitude ?? shop?.latitude);
+    const lng = normalizeCoordinate(v.longitude ?? shop?.longitude);
+    if (lat === null || lng === null) continue;
 
-<<<<<<< HEAD
-    // Only filter by shop region when we actually have shop data
-    if (region_id    && shop && shop.region_id    !== parseInt(region_id))    continue;
+    // Only filter by shop region when shop data is available.
+    if (region_id && shop && shop.region_id !== parseInt(region_id)) continue;
     if (subregion_id && shop && shop.subregion_id !== parseInt(subregion_id)) continue;
-=======
-    if (region_id    && shop?.region_id    !== parseInt(region_id))    continue;
-    if (subregion_id && shop?.subregion_id !== parseInt(subregion_id)) continue;
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
 
     const items = visitItemsByVisit[v.id] || [];
     const totalSold = items.reduce((s, i) => s + (i.sold || 0), 0);
@@ -292,11 +272,7 @@ export default async function handler(req, res) {
 
     markers.push({
       id:               `visit-${v.id}`,
-<<<<<<< HEAD
       shop_id:          v.shop_id || null,
-=======
-      shop_id:          shop?.id || null,
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
       shop_name:        shop?.name || 'Unknown Shop',
       shop_location:    shop?.location || null,
       latitude:         lat,
@@ -317,9 +293,9 @@ export default async function handler(req, res) {
     const shop = shopMap[u.shop_id];
     if (!shop) continue;
 
-    const lat = shop.latitude;
-    const lng = shop.longitude;
-    if (!lat || !lng) continue;
+    const lat = normalizeCoordinate(shop.latitude);
+    const lng = normalizeCoordinate(shop.longitude);
+    if (lat === null || lng === null) continue;
     if (region_id && shop.region_id !== parseInt(region_id)) continue;
     if (subregion_id && shop.subregion_id !== parseInt(subregion_id)) continue;
 
@@ -355,25 +331,16 @@ export default async function handler(req, res) {
     });
   }
 
-<<<<<<< HEAD
   // ── 9. Unvisited shops (show_all) ──────────────────────────────────────
   if (show_all === '1') {
-    // Build visited set from RAW visit/uplift rows (not markers) so a shop
-    // is never wrongly marked unvisited just because a marker was skipped
     const visitedShopIds = new Set();
     visits.forEach(v => { if (v.shop_id) visitedShopIds.add(v.shop_id); });
     uplifts.forEach(u => { if (u.shop_id) visitedShopIds.add(u.shop_id); });
-=======
-  // ── 9. Unvisited shops ─────────────────────────────────────────────────
-  if (show_all === '1') {
-    const visitedShopIds = new Set(markers.map(m => m.shop_id).filter(Boolean));
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
 
     const allShops = [];
     let sPage = 0;
     const S_PAGE = 1000;
 
-<<<<<<< HEAD
     while (true) {
       let shopsQuery = adminSupabase
         .from('shops')
@@ -398,12 +365,6 @@ export default async function handler(req, res) {
       allShops.push(...chunk);
       if (chunk.length < S_PAGE) break;
       sPage++;
-=======
-    if (effectiveVisitRegions.length > 0) {
-      shopsQuery = shopsQuery.in('region_id', effectiveVisitRegions);
-    } else if (region_id) {
-      shopsQuery = shopsQuery.eq('region_id', parseInt(region_id));
->>>>>>> e974051c90c42d2d2b07c6b7b3f6f2384b1e8c73
     }
 
     for (const shop of allShops) {
