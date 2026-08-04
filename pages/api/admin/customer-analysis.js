@@ -277,17 +277,77 @@ export default async function handler(req, res) {
 
   // ── MODE: SALES ───────────────────────────────────────────────────────
   if (mode === 'sales') {
-    let salesQ = adminSupabase
+    // Fetch all visits paginated (bypasses Supabase max_rows cap) +
+    // all-time stats in parallel on the first round-trip.
+    const PAGE = 1000;
+    const visits = [];
+    let vErr = null;
+    let offset = 0;
+    let firstPageQ = adminSupabase
       .from('visits')
-      .select('id, shop_id, created_at, visit_items(product_id, sold)')
+      .select('id, shop_id, created_at')
       .in('shop_id', shopIds)
       .eq('visit_type', 'sales')
       .gte('created_at', start)
       .lt('created_at', end)
-      .order('created_at');
-    if (user_id) salesQ = salesQ.eq('user_id', user_id);
-    const { data: visits, error: vErr } = await salesQ;
+      .order('created_at')
+      .range(0, PAGE - 1);
+    if (user_id) firstPageQ = firstPageQ.eq('user_id', user_id);
+    const [{ data: firstPage, error: firstErr }, { data: periodCartons, error: pcErr }] = await Promise.all([
+      firstPageQ,
+      adminSupabase.rpc('get_period_summary', {
+        p_region_ids:    effectiveRegionIds.length > 0 ? effectiveRegionIds : null,
+        p_subregion_id:  subregion_id ? parseInt(subregion_id, 10) : null,
+        p_user_id:       user_id || null,
+        p_start:         start,
+        p_end:           end,
+      }),
+    ]);
+    if (firstErr) return res.status(500).json({ error: firstErr.message });
+    if (!pcErr && periodCartons) {
+      const ps = Array.isArray(periodCartons) ? periodCartons[0] : periodCartons;
+      res.setHeader('X-Total-Cartons', String(ps?.total_cartons ?? 0));
+      res.setHeader('X-Total-Visits',  String(ps?.total_visits  ?? 0));
+      res.setHeader('X-Active-Shops',  String(ps?.active_shops  ?? 0));
+    }
+    if (firstPage) visits.push(...firstPage);
+    // Keep fetching until a page comes back shorter than PAGE
+    while (visits.length % PAGE === 0 && visits.length > 0) {
+      offset += PAGE;
+      let pageQ = adminSupabase
+        .from('visits')
+        .select('id, shop_id, created_at')
+        .in('shop_id', shopIds)
+        .eq('visit_type', 'sales')
+        .gte('created_at', start)
+        .lt('created_at', end)
+        .order('created_at')
+        .range(offset, offset + PAGE - 1);
+      if (user_id) pageQ = pageQ.eq('user_id', user_id);
+      const { data: pageData, error: pageErr } = await pageQ;
+      if (pageErr) { vErr = pageErr; break; }
+      if (!pageData || pageData.length === 0) break;
+      visits.push(...pageData);
+      if (pageData.length < PAGE) break;
+    }
     if (vErr) return res.status(500).json({ error: vErr.message });
+
+    // Fetch visit_items in chunks of 200 (bypasses URL length limit)
+    const allVisitIds = visits.map(v => v.id);
+    const CHUNK = 200;
+    const itemsMap = {};
+    for (let ci = 0; ci < allVisitIds.length; ci += CHUNK) {
+      const chunk = allVisitIds.slice(ci, ci + CHUNK);
+      const { data: items, error: iErr } = await adminSupabase
+        .from('visit_items')
+        .select('visit_id, product_id, sold')
+        .in('visit_id', chunk);
+      if (iErr) return res.status(500).json({ error: iErr.message });
+      for (const item of (items || [])) {
+        if (!itemsMap[item.visit_id]) itemsMap[item.visit_id] = [];
+        itemsMap[item.visit_id].push(item);
+      }
+    }
 
     // Aggregate per shop
     const aggr = {};
@@ -295,17 +355,18 @@ export default async function handler(req, res) {
       aggr[id] = { visits: 0, sold: 0, not_sold_visits: 0, last_visit: null, by_sku: {}, trend: {} };
     });
 
-    (visits || []).forEach(v => {
+    visits.forEach(v => {
       if (!aggr[v.shop_id]) return;
       const a = aggr[v.shop_id];
       a.visits++;
-      const daySold = (v.visit_items || []).reduce((s, i) => s + (i.sold || 0), 0);
+      const visitItems = itemsMap[v.id] || [];
+      const daySold = visitItems.reduce((s, i) => s + (i.sold || 0), 0);
       a.sold += daySold;
       if (daySold === 0) a.not_sold_visits++;
       const day = v.created_at.slice(0, 10);
       a.trend[day] = (a.trend[day] || 0) + daySold;
       if (!a.last_visit || v.created_at > a.last_visit) a.last_visit = v.created_at;
-      (v.visit_items || []).forEach(i => {
+      visitItems.forEach(i => {
         if (i.sold > 0) a.by_sku[i.product_id] = (a.by_sku[i.product_id] || 0) + i.sold;
       });
     });
@@ -336,11 +397,6 @@ export default async function handler(req, res) {
       .filter(x => x)
       .sort((a, b) => b.total_sold - a.total_sold);
 
-    const hasFiltersSales = !!(subregion_id || region_id || dateFrom || dateTo || shop_id || user_id);
-    if (!hasFiltersSales && result.length > 10) {
-      res.setHeader('X-Data-Limited', 'true');
-      return res.status(200).json(result.slice(0, 10));
-    }
     return res.status(200).json(result);
   }
 

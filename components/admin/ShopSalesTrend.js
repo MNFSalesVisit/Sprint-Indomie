@@ -89,7 +89,6 @@ export default function ShopSalesTrend({
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
   const [expanded, setExpanded] = useState({});
-  const [visibleCount, setVisibleCount] = useState(10);
   const [previewOpen, setPreviewOpen] = useState(false);
 
   // Filter state
@@ -161,7 +160,7 @@ export default function ShopSalesTrend({
 
   // ── Load data ──────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
-    setLoading(true); setError(''); setRows([]); setExpanded({}); setVisibleCount(10);
+    setLoading(true); setError(''); setRows([]); setExpanded({});
     try {
       const res = await fetch(`/api/admin/customer-analysis?${buildQuery()}`, { headers: authHeader });
       if (!res.ok) {
@@ -180,7 +179,11 @@ export default function ShopSalesTrend({
 
   // ── Excel export ───────────────────────────────────────────────────────────
   const handleExport = async () => {
-    if (!rows || rows.length === 0) return;
+    const exportRows = shopSearch.trim()
+      ? rows.filter(r => (r.shop_name || '').toLowerCase().includes(shopSearch.toLowerCase()))
+      : rows;
+
+    if (!exportRows || exportRows.length === 0) return;
     try {
       const ExcelJS = (await import('exceljs')).default;
       const wb = new ExcelJS.Workbook();
@@ -199,7 +202,7 @@ export default function ShopSalesTrend({
         { header: 'Trend',        key: 'trend',    width: 16 },
         { header: 'Top SKU',      key: 'topsku',   width: 16 },
       ];
-      rows.forEach((r, i) => {
+      exportRows.forEach((r, i) => {
         const totalSaleVisits = r.total_visits - (r.total_not_sold_visits || 0);
         const eff = r.total_visits > 0 ? Math.round((totalSaleVisits / r.total_visits) * 100) : 0;
         const trendInfo = getTrend(r.trend);
@@ -334,7 +337,7 @@ export default function ShopSalesTrend({
       {/* Shop cards */}
       {!loading && displayRows.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {displayRows.slice(0, visibleCount).map((shop) => {
+          {displayRows.map((shop) => {
             const isOpen = !!expanded[shop.shop_id];
             const trend  = getTrend(shop.trend);
             const totalSaleVisits = shop.total_visits - (shop.total_not_sold_visits || 0);
@@ -477,33 +480,7 @@ export default function ShopSalesTrend({
               </div>
             );
           })}
-          {displayRows.length > 10 && (
-            <div style={{ textAlign: 'center', paddingTop: 4 }}>
-              {visibleCount < displayRows.length ? (
-                <button
-                  onClick={() => setVisibleCount(c => c + 10)}
-                  style={{
-                    padding: '7px 22px', border: `1px solid ${primary}`, borderRadius: 8,
-                    background: '#fff', color: primary, fontWeight: 600, fontSize: '0.82rem',
-                    cursor: 'pointer',
-                  }}
-                >
-                  Show more ({displayRows.length - visibleCount} remaining)
-                </button>
-              ) : (
-                <button
-                  onClick={() => setVisibleCount(10)}
-                  style={{
-                    padding: '7px 22px', border: '1px solid #e5e7eb', borderRadius: 8,
-                    background: '#fff', color: '#6b7280', fontWeight: 600, fontSize: '0.82rem',
-                    cursor: 'pointer',
-                  }}
-                >
-                  Show less
-                </button>
-              )}
-            </div>
-          )}        </div>
+        </div>
       )}
 
       <ReportPreviewModal
