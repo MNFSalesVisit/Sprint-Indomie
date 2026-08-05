@@ -277,24 +277,29 @@ export default async function handler(req, res) {
 
   // ── MODE: SALES ───────────────────────────────────────────────────────
   if (mode === 'sales') {
-    // Fetch all visits paginated (bypasses Supabase max_rows cap) +
-    // all-time stats in parallel on the first round-trip.
     const PAGE = 1000;
-    const visits = [];
-    let vErr = null;
-    let offset = 0;
-    let firstPageQ = adminSupabase
+
+    // ── Step 1: Page through ALL visits in the period to collect unique shop IDs ─
+    // We do NOT pre-filter by the top-level shopIds (which is capped at 1000 by
+    // Supabase). Going directly to the visits table guarantees we find every shop
+    // that was active in the period, regardless of how many shops exist.
+    const periodShopIdSet = new Set();
+    const periodVisitIdSet = new Set(); // tracks which visit IDs fall in the period
+    let pvOffset = 0;
+    let pvErr = null;
+
+    // Fire the first period-visit page and the summary RPC in parallel.
+    let firstPvQ = adminSupabase
       .from('visits')
-      .select('id, shop_id, created_at')
-      .in('shop_id', shopIds)
+      .select('id, shop_id')
       .eq('visit_type', 'sales')
       .gte('created_at', start)
       .lt('created_at', end)
-      .order('created_at')
       .range(0, PAGE - 1);
-    if (user_id) firstPageQ = firstPageQ.eq('user_id', user_id);
-    const [{ data: firstPage, error: firstErr }, { data: periodCartons, error: pcErr }] = await Promise.all([
-      firstPageQ,
+    if (user_id) firstPvQ = firstPvQ.eq('user_id', user_id);
+
+    const [{ data: pvFirst, error: pvFirstErr }, { data: periodCartons, error: pcErr }] = await Promise.all([
+      firstPvQ,
       adminSupabase.rpc('get_period_summary', {
         p_region_ids:    effectiveRegionIds.length > 0 ? effectiveRegionIds : null,
         p_subregion_id:  subregion_id ? parseInt(subregion_id, 10) : null,
@@ -303,28 +308,89 @@ export default async function handler(req, res) {
         p_end:           end,
       }),
     ]);
-    if (firstErr) return res.status(500).json({ error: firstErr.message });
+    if (pvFirstErr) return res.status(500).json({ error: pvFirstErr.message });
+    (pvFirst || []).forEach(v => { periodShopIdSet.add(v.shop_id); periodVisitIdSet.add(v.id); });
+
+    // Keep paging until we have every visit in the period.
+    // Track whether the last page was full — that's the correct signal for more rows,
+    // NOT periodShopIdSet.size (which counts unique shops, not total rows fetched).
+    let pvLastFull = (pvFirst?.length ?? 0) >= PAGE;
+    while (pvLastFull) {
+      pvOffset += PAGE;
+      let pvQ = adminSupabase
+        .from('visits')
+        .select('id, shop_id')
+        .eq('visit_type', 'sales')
+        .gte('created_at', start)
+        .lt('created_at', end)
+        .range(pvOffset, pvOffset + PAGE - 1);
+      if (user_id) pvQ = pvQ.eq('user_id', user_id);
+      const { data: pvPage, error: pvPageErr } = await pvQ;
+      if (pvPageErr) { pvErr = pvPageErr; break; }
+      if (!pvPage || pvPage.length === 0) break;
+      pvPage.forEach(v => { periodShopIdSet.add(v.shop_id); periodVisitIdSet.add(v.id); });
+      pvLastFull = pvPage.length >= PAGE;
+    }
+    if (pvErr) return res.status(500).json({ error: pvErr.message });
+
+    // Set period-level summary headers (always reflect the filtered window)
     if (!pcErr && periodCartons) {
       const ps = Array.isArray(periodCartons) ? periodCartons[0] : periodCartons;
       res.setHeader('X-Total-Cartons', String(ps?.total_cartons ?? 0));
       res.setHeader('X-Total-Visits',  String(ps?.total_visits  ?? 0));
       res.setHeader('X-Active-Shops',  String(ps?.active_shops  ?? 0));
     }
+
+    const rawPeriodShopIds = [...periodShopIdSet];
+    if (rawPeriodShopIds.length === 0) return res.status(200).json([]);
+
+    // ── Step 2: Fetch shop details for those IDs, applying region/subregion filter ─
+    // Batch in chunks of 500 to avoid Supabase URL-length limits.
+    const SHOP_CHUNK = 500;
+    const activeShops = [];
+    for (let si = 0; si < rawPeriodShopIds.length; si += SHOP_CHUNK) {
+      const chunk = rawPeriodShopIds.slice(si, si + SHOP_CHUNK);
+      let q = adminSupabase
+        .from('shops')
+        .select('id, name, location, subregion_id, region_id')
+        .in('id', chunk);
+      if (subregion_id)                 q = q.eq('subregion_id', parseInt(subregion_id));
+      if (shop_id)                      q = q.eq('id', parseInt(shop_id));
+      if (effectiveRegionIds.length > 0) q = q.in('region_id', effectiveRegionIds);
+      const { data: chunkShops, error: csErr } = await q;
+      if (csErr) return res.status(500).json({ error: csErr.message });
+      if (chunkShops) activeShops.push(...chunkShops);
+    }
+
+    if (activeShops.length === 0) return res.status(200).json([]);
+    const activeShopIds = activeShops.map(s => s.id);
+    const activeShopMap = {};
+    activeShops.forEach(s => { activeShopMap[s.id] = s; });
+
+    // ── Step 3: Fetch ALL visits for those shops (no date restriction, paginated) ─
+    // Stats and trend reflect the shop’s complete history, not just the filter window.
+    const visits = [];
+    let vErr = null;
+    let vOffset = 0;
+    const { data: firstPage, error: firstErr } = await adminSupabase
+      .from('visits')
+      .select('id, shop_id, created_at')
+      .in('shop_id', activeShopIds)
+      .eq('visit_type', 'sales')
+      .order('created_at')
+      .range(0, PAGE - 1);
+    if (firstErr) return res.status(500).json({ error: firstErr.message });
     if (firstPage) visits.push(...firstPage);
-    // Keep fetching until a page comes back shorter than PAGE
-    while (visits.length % PAGE === 0 && visits.length > 0) {
-      offset += PAGE;
-      let pageQ = adminSupabase
+
+    while (visits.length > 0 && visits.length === vOffset + PAGE) {
+      vOffset += PAGE;
+      const { data: pageData, error: pageErr } = await adminSupabase
         .from('visits')
         .select('id, shop_id, created_at')
-        .in('shop_id', shopIds)
+        .in('shop_id', activeShopIds)
         .eq('visit_type', 'sales')
-        .gte('created_at', start)
-        .lt('created_at', end)
         .order('created_at')
-        .range(offset, offset + PAGE - 1);
-      if (user_id) pageQ = pageQ.eq('user_id', user_id);
-      const { data: pageData, error: pageErr } = await pageQ;
+        .range(vOffset, vOffset + PAGE - 1);
       if (pageErr) { vErr = pageErr; break; }
       if (!pageData || pageData.length === 0) break;
       visits.push(...pageData);
@@ -349,15 +415,15 @@ export default async function handler(req, res) {
       }
     }
 
-    // Aggregate per shop
+    // ── Step 4: Aggregate all-time data per active shop ───────────────────
     const aggr = {};
-    shopIds.forEach(id => {
-      aggr[id] = { visits: 0, sold: 0, not_sold_visits: 0, last_visit: null, by_sku: {}, trend: {} };
+    activeShopIds.forEach(id => {
+      aggr[id] = { visits: 0, sold: 0, not_sold_visits: 0, last_visit: null, by_sku: {}, trend: {}, period_sold: 0, period_by_sku: {} };
     });
 
     visits.forEach(v => {
-      if (!aggr[v.shop_id]) return;
       const a = aggr[v.shop_id];
+      if (!a) return;
       a.visits++;
       const visitItems = itemsMap[v.id] || [];
       const daySold = visitItems.reduce((s, i) => s + (i.sold || 0), 0);
@@ -369,17 +435,30 @@ export default async function handler(req, res) {
       visitItems.forEach(i => {
         if (i.sold > 0) a.by_sku[i.product_id] = (a.by_sku[i.product_id] || 0) + i.sold;
       });
+      // Period-specific aggregation: used for sorting and top_sku
+      if (periodVisitIdSet.has(v.id)) {
+        a.period_sold += daySold;
+        visitItems.forEach(i => {
+          if (i.sold > 0) a.period_by_sku[i.product_id] = (a.period_by_sku[i.product_id] || 0) + i.sold;
+        });
+      }
     });
 
-    const result = shops
+    // Build result — every active shop, sorted by PERIOD cartons sold (top buyer this period first)
+    const result = activeShops
       .map(s => {
         const a = aggr[s.id];
+        if (!a) return null;
+        // All-time SKU breakdown (shown in expanded card)
         const bySku = Object.entries(a.by_sku)
           .map(([pid, sold]) => ({ sku: productMap[parseInt(pid)]?.sku || '?', name: productMap[parseInt(pid)]?.name || 'Unknown', sold }))
           .filter(x => (x.sold || 0) > 0)
           .sort((a, b) => b.sold - a.sold);
-        // Exclude shops that had zero sales visits (uplift-only or untouched shops)
-        if (a.visits === 0) return null;
+        // Period top SKU (used for top_sku field and sorting)
+        const periodBySku = Object.entries(a.period_by_sku)
+          .map(([pid, sold]) => ({ sku: productMap[parseInt(pid)]?.sku || '?', sold }))
+          .filter(x => (x.sold || 0) > 0)
+          .sort((a, b) => b.sold - a.sold);
         const trend = Object.entries(a.trend)
           .map(([date, sold]) => ({ date, sold }))
           .sort((a, b) => a.date.localeCompare(b.date));
@@ -390,12 +469,14 @@ export default async function handler(req, res) {
           total_visits: a.visits, total_sold: a.sold,
           total_not_sold_visits: a.not_sold_visits,
           last_visit_date: a.last_visit ? a.last_visit.slice(0, 10) : null,
-          top_sku: bySku[0]?.sku || null,
+          top_sku: periodBySku[0]?.sku || null,       // top SKU in the filtered period
+          top_sku_sold: periodBySku[0]?.sold || 0,         // cartons for that SKU in the period
+          period_sold: a.period_sold,                      // cartons sold in the filtered period
           by_sku: bySku, trend,
         };
       })
       .filter(x => x)
-      .sort((a, b) => b.total_sold - a.total_sold);
+      .sort((a, b) => b.period_sold - a.period_sold); // sort by period cartons, not all-time
 
     return res.status(200).json(result);
   }
