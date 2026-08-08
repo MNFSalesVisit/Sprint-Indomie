@@ -27,9 +27,9 @@ export default async function handler(req, res) {
   const year = parseInt(req.query.year, 10) || new Date().getFullYear();
   const month = parseInt(req.query.month, 10) || (new Date().getMonth() + 1);
 
-  // month is 1-based
-  const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-  const end = new Date(Date.UTC(year, month, 1, 0, 0, 0));
+  // month is 1-based; use local month boundaries to match the admin performance period semantics
+  const start = new Date(year, month - 1, 1, 0, 0, 0);
+  const end = new Date(year, month, 1, 0, 0, 0);
   const isoStart = start.toISOString();
   const isoEnd = end.toISOString();
 
@@ -46,25 +46,55 @@ export default async function handler(req, res) {
     const monthlyTarget = targetRow?.cartons_target ?? null;
     console.log('Performance targets loaded for user', userId, { monthlyTarget });
 
-    // visits in the month
-    const { data: visits } = await adminSupabase
-      .from('visits')
-      .select('id, created_at')
-      .eq('user_id', userId)
-      .eq('visit_type', 'sales')
-      .gte('created_at', isoStart)
-      .lt('created_at', isoEnd);
+    // visits in the month (paginate to avoid Supabase row limits)
+    const VISIT_PAGE_SIZE = 1000;
+    const visits = [];
+    let visitPage = 0;
+
+    while (true) {
+      const { data: visitBatch, error: visitErr } = await adminSupabase
+        .from('visits')
+        .select('id, created_at')
+        .eq('user_id', userId)
+        .eq('visit_type', 'sales')
+        .gte('created_at', isoStart)
+        .lt('created_at', isoEnd)
+        .range(visitPage * VISIT_PAGE_SIZE, (visitPage + 1) * VISIT_PAGE_SIZE - 1);
+
+      if (visitErr) throw visitErr;
+      if (!visitBatch || visitBatch.length === 0) break;
+
+      visits.push(...visitBatch);
+      if (visitBatch.length < VISIT_PAGE_SIZE) break;
+      visitPage += 1;
+    }
 
     const visitIds = (visits || []).map(v => v.id);
 
-    // visit items aggregated
+    // visit items aggregated (paginate item rows and chunk visit IDs)
     let items = [];
     if (visitIds.length > 0) {
-      const { data: it } = await adminSupabase
-        .from('visit_items')
-        .select('visit_id, sold')
-        .in('visit_id', visitIds);
-      items = it || [];
+      const VISIT_ITEM_CHUNK = 1000;
+      for (let i = 0; i < visitIds.length; i += VISIT_ITEM_CHUNK) {
+        const chunk = visitIds.slice(i, i + VISIT_ITEM_CHUNK);
+        let itemOffset = 0;
+
+        while (true) {
+          const { data: itemBatch, error: itemErr } = await adminSupabase
+            .from('visit_items')
+            .select('visit_id, sold')
+            .in('visit_id', chunk)
+            .order('visit_id', { ascending: true })
+            .range(itemOffset, itemOffset + VISIT_PAGE_SIZE - 1);
+
+          if (itemErr) throw itemErr;
+          if (!itemBatch || itemBatch.length === 0) break;
+
+          items.push(...itemBatch);
+          if (itemBatch.length < VISIT_PAGE_SIZE) break;
+          itemOffset += VISIT_PAGE_SIZE;
+        }
+      }
     }
 
     // prepare daily buckets (use local date formatting to avoid UTC shifts)
@@ -95,28 +125,12 @@ export default async function handler(req, res) {
     const dailyTarget = monthlyTarget ? Math.round(monthlyTarget / daysInMonth) : null;
     const daily = Object.keys(dailyMap).sort().map(date => ({ date, cartons: dailyMap[date], target: dailyTarget }));
 
-    // weekly: simple 7-day buckets starting day 1
-    const weekly = [];
-    for (let startDay = 1; startDay <= daysInMonth; startDay += 7) {
-      const endDay = Math.min(startDay + 6, daysInMonth);
-      const label = `${startDay}-${endDay}`;
-      let sum = 0;
-      for (let d = startDay; d <= endDay; d++) {
-        const key = new Date(Date.UTC(year, month - 1, d)).toISOString().slice(0, 10);
-        sum += dailyMap[key] || 0;
-      }
-      const weekTarget = monthlyTarget ? Math.round((monthlyTarget / daysInMonth) * (endDay - startDay + 1)) : null;
-      weekly.push({ label, cartons: sum, target: weekTarget });
-    }
-
     const totalCartons = Object.values(dailyMap).reduce((s, v) => s + v, 0);
-
-    const weeklyTargetApprox = weekly.length > 0 ? weekly[0].target : null;
 
     return res.status(200).json({
       year, month, daysInMonth,
-      targets: { daily_target: dailyTarget, weekly_target: weeklyTargetApprox, monthly_target: monthlyTarget },
-      daily, weekly, monthly: { cartons: totalCartons, target: monthlyTarget }
+      targets: { daily_target: dailyTarget, monthly_target: monthlyTarget },
+      daily, monthly: { cartons: totalCartons, target: monthlyTarget }
     });
   } catch (err) {
     console.error('Performance API error:', err);

@@ -109,17 +109,12 @@ export default function MyPerformance({ primary = '#6366f1', accent = '#06b6d4' 
   // daily entry for today (always present in API response; if not, default to 0)
   const dailyData = data ? (data.daily.find(d => d.date === todayIso) || { date: todayIso, cartons: 0, target: null }) : null;
 
-  // pick week index that contains today's day
-  const refDay = nowDate.getDate();
-  const weekIndex = data ? Math.floor((refDay - 1) / 7) : 0;
-  const weeklyData = data ? (data.weekly[weekIndex] || { label: '1-7', cartons: 0, target: null }) : null;
-
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div>
           <h2 style={{ margin: 0, fontSize: '1.02rem' }}>My Performance</h2>
-          <div style={{ color: '#64748b', fontSize: '0.85rem' }}>Daily · Weekly · Monthly</div>
+          <div style={{ color: '#64748b', fontSize: '0.85rem' }}>Daily · Monthly</div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <select value={year} onChange={e => setYear(Number(e.target.value))} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid #e6e9f8' }}>
@@ -136,23 +131,20 @@ export default function MyPerformance({ primary = '#6366f1', accent = '#06b6d4' 
 
       {data && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
-          {/** Render three stacked performance cards: Daily, Weekly, Monthly **/}
+          {/** Render two stacked performance cards: Daily and Monthly **/}
           {[
-            { key: 'daily',  title: 'Daily',   meta: dailyData,  color: primary },
-            { key: 'weekly', title: 'Weekly',  meta: weeklyData, color: accent  },
-            { key: 'monthly',title: 'Monthly', meta: data.monthly, color: primary },
+            { key: 'daily',   title: 'Daily',   meta: dailyData,      color: primary },
+            { key: 'monthly', title: 'Monthly', meta: data.monthly,  color: accent  },
           ].map(card => {
             const val = card.meta?.cartons ?? 0;
             const tgt = card.meta?.target ?? null; // may be null if no target set
             const pct = (tgt && tgt > 0) ? Math.min(100, Math.round((val / tgt) * 100)) : null;
 
-            // Debug logs required by user
             if (card.key === 'daily') console.log('Daily:', { actual: val, target: tgt, progress: pct });
-            if (card.key === 'weekly') console.log('Weekly:', { actual: val, target: tgt, progress: pct });
             if (card.key === 'monthly') console.log('Monthly:', { actual: val, target: tgt, progress: pct });
             const subLabel = card.key === 'daily'
               ? (card.meta ? new Date(card.meta.date).toLocaleDateString() : '—')
-              : (card.key === 'weekly' ? (card.meta?.label || '—') : `${monthNames[month - 1]} ${year}`);
+              : `${monthNames[month - 1]} ${year}`;
 
             return (
               <div key={card.key} style={{ padding: 16, borderRadius: 12, background: '#fff', boxShadow: '0 2px 8px rgba(2,6,23,0.04)', display: 'flex', gap: 12, alignItems: 'center' }}>

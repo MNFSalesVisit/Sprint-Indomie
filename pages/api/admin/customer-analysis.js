@@ -7,6 +7,50 @@ const adminSupabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
+function parseDateOnlyUTC(value) {
+  if (!value) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function parseIntegerParam(value) {
+  if (value == null || value === '' || value === 'null' || value === 'undefined') return null;
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function buildDateWindow(dateFrom, dateTo, year, month) {
+  if (dateFrom) {
+    const startDate = parseDateOnlyUTC(dateFrom);
+    if (!startDate) return null;
+
+    const start = startDate.toISOString();
+    let end;
+
+    if (dateTo) {
+      const toDate = parseDateOnlyUTC(dateTo);
+      if (!toDate) return null;
+      end = new Date(Date.UTC(toDate.getUTCFullYear(), toDate.getUTCMonth(), toDate.getUTCDate() + 1)).toISOString();
+    } else {
+      const y = parseIntegerParam(year) ?? startDate.getUTCFullYear();
+      const m = parseIntegerParam(month) ?? (startDate.getUTCMonth() + 1);
+      if (m < 1 || m > 12) return null;
+      end = new Date(Date.UTC(y, m, 1)).toISOString();
+    }
+
+    return { start, end };
+  }
+
+  const y = parseIntegerParam(year) ?? new Date().getFullYear();
+  const m = parseIntegerParam(month) ?? new Date().getMonth() + 1;
+  if (m < 1 || m > 12) return null;
+  return {
+    start: new Date(Date.UTC(y, m - 1, 1)).toISOString(),
+    end: new Date(Date.UTC(y, m, 1)).toISOString(),
+  };
+}
+
 async function verifyAdmin(token) {
   const { data: { user }, error } = await adminSupabase.auth.getUser(token);
   if (error || !user) return null;
@@ -18,7 +62,9 @@ async function verifyAdmin(token) {
   if (!appUser) return null;
   const role = appUser.roles?.name;
   if (!['Admin', 'Super Admin', 'Manager'].includes(role)) return null;
-  const allowedRegionIds = (appUser.user_regions || []).map(r => r.region_id);
+  const allowedRegionIds = (appUser.user_regions || [])
+    .map(r => parseIntegerParam(r.region_id))
+    .filter(id => id !== null);
   return { id: appUser.id, role, allowedRegionIds };
 }
 
@@ -57,6 +103,11 @@ async function verifyAdmin(token) {
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
+  const sanitizedQuery = {};
+  for (const [key, value] of Object.entries(req.query)) {
+    sanitizedQuery[key] = value === 'null' || value === 'undefined' ? undefined : value;
+  }
+
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Unauthorised' });
 
@@ -68,19 +119,24 @@ export default async function handler(req, res) {
   const { allowedRegionIds } = admin;
 
 
-  const { year, month, dateFrom, dateTo, subregion_id, shop_id, region_id, user_id, mode = 'sales' } = req.query;
+  const { year, month, dateFrom, dateTo, subregion_id, shop_id, region_id, user_id, mode = 'sales' } = sanitizedQuery;
+  const regionId = parseIntegerParam(region_id);
+  const subregionId = parseIntegerParam(subregion_id);
+  const shopId = parseIntegerParam(shop_id);
+  const userId = parseIntegerParam(user_id);
+
   // region_id narrows the scope: if Manager has assigned regions, intersect with the requested
   // region so selecting "Mombasa" shows only Mombasa even when the manager covers multiple regions
   const effectiveRegionIds = allowedRegionIds.length > 0
-    ? (region_id ? allowedRegionIds.filter(id => id === parseInt(region_id)) : allowedRegionIds)
-    : region_id ? [parseInt(region_id)] : [];
+    ? (regionId ? allowedRegionIds.filter(id => id === regionId) : allowedRegionIds)
+    : regionId ? [regionId] : [];
   let start, end;
   if (mode !== 'stock') {
     if (!dateFrom && (!year || !month)) return res.status(400).json({ error: 'year and month are required' });
-    const y = year ? parseInt(year) : new Date().getFullYear();
-    const m = month ? parseInt(month) : new Date().getMonth() + 1;
-    start = dateFrom ? new Date(dateFrom + 'T00:00:00').toISOString() : new Date(y, m - 1, 1).toISOString();
-    end   = dateTo   ? new Date(dateTo   + 'T23:59:59.999').toISOString() : new Date(y, m, 1).toISOString();
+    const window = buildDateWindow(dateFrom, dateTo, year, month);
+    if (!window) return res.status(400).json({ error: 'Invalid date filter' });
+    start = window.start;
+    end = window.end;
   }
 
   // ── Fetch products for SKU lookup ────────────────────────────────────
@@ -110,14 +166,14 @@ export default async function handler(req, res) {
     .from('shops')
     .select('id, name, location, subregion_id, region_id')
     .order('name');
-  if (subregion_id) shopsQ = shopsQ.eq('subregion_id', parseInt(subregion_id));
-  if (shop_id)      shopsQ = shopsQ.eq('id', parseInt(shop_id));
+  if (subregionId !== null) shopsQ = shopsQ.eq('subregion_id', subregionId);
+  if (shopId !== null)      shopsQ = shopsQ.eq('id', shopId);
   if (effectiveRegionIds.length > 0) shopsQ = shopsQ.in('region_id', effectiveRegionIds);
   const { data: shops } = await shopsQ;
   if (!shops || shops.length === 0) return res.status(200).json([]);
-  const shopIds  = shops.map(s => s.id);
+  const shopIds  = shops.map(s => s.id).filter(id => id != null);
   const shopMap  = {};
-  shops.forEach(s => { shopMap[s.id] = s; });
+  shops.forEach(s => { if (s.id != null) shopMap[s.id] = s; });
 
   // ── MODE: STOCK POSITIONS ─────────────────────────────────────────────
   // Returns latest stock_position per shop per SKU (no date restriction).
@@ -175,7 +231,7 @@ export default async function handler(req, res) {
 
     let upliftItems = [];
     try {
-      const upliftIds = upliftRows.map(u => u.id);
+      const upliftIds = upliftRows.map(u => u.id).filter(id => id != null);
       for (let i = 0; i < upliftIds.length; i += ITEM_PAGE) {
         const chunk = upliftIds.slice(i, i + ITEM_PAGE);
         const { data: items, error: itemErr } = await adminSupabase
@@ -296,20 +352,20 @@ export default async function handler(req, res) {
       .gte('created_at', start)
       .lt('created_at', end)
       .range(0, PAGE - 1);
-    if (user_id) firstPvQ = firstPvQ.eq('user_id', user_id);
+    if (userId !== null) firstPvQ = firstPvQ.eq('user_id', userId);
 
     const [{ data: pvFirst, error: pvFirstErr }, { data: periodCartons, error: pcErr }] = await Promise.all([
       firstPvQ,
       adminSupabase.rpc('get_period_summary', {
         p_region_ids:    effectiveRegionIds.length > 0 ? effectiveRegionIds : null,
-        p_subregion_id:  subregion_id ? parseInt(subregion_id, 10) : null,
-        p_user_id:       user_id || null,
+        p_subregion_id:  subregionId,
+        p_user_id:       userId,
         p_start:         start,
         p_end:           end,
       }),
     ]);
     if (pvFirstErr) return res.status(500).json({ error: pvFirstErr.message });
-    (pvFirst || []).forEach(v => { periodShopIdSet.add(v.shop_id); periodVisitIdSet.add(v.id); });
+    (pvFirst || []).forEach(v => { if (v.shop_id != null) { periodShopIdSet.add(v.shop_id); periodVisitIdSet.add(v.id); } });
 
     // Keep paging until we have every visit in the period.
     // Track whether the last page was full — that's the correct signal for more rows,
@@ -324,11 +380,11 @@ export default async function handler(req, res) {
         .gte('created_at', start)
         .lt('created_at', end)
         .range(pvOffset, pvOffset + PAGE - 1);
-      if (user_id) pvQ = pvQ.eq('user_id', user_id);
+      if (userId !== null) pvQ = pvQ.eq('user_id', userId);
       const { data: pvPage, error: pvPageErr } = await pvQ;
       if (pvPageErr) { pvErr = pvPageErr; break; }
       if (!pvPage || pvPage.length === 0) break;
-      pvPage.forEach(v => { periodShopIdSet.add(v.shop_id); periodVisitIdSet.add(v.id); });
+      pvPage.forEach(v => { if (v.shop_id != null) { periodShopIdSet.add(v.shop_id); periodVisitIdSet.add(v.id); } });
       pvLastFull = pvPage.length >= PAGE;
     }
     if (pvErr) return res.status(500).json({ error: pvErr.message });
@@ -354,16 +410,16 @@ export default async function handler(req, res) {
         .from('shops')
         .select('id, name, location, subregion_id, region_id')
         .in('id', chunk);
-      if (subregion_id)                 q = q.eq('subregion_id', parseInt(subregion_id));
-      if (shop_id)                      q = q.eq('id', parseInt(shop_id));
-      if (effectiveRegionIds.length > 0) q = q.in('region_id', effectiveRegionIds);
+      if (subregionId !== null)                 q = q.eq('subregion_id', subregionId);
+      if (shopId !== null)                      q = q.eq('id', shopId);
+      if (effectiveRegionIds.length > 0)        q = q.in('region_id', effectiveRegionIds);
       const { data: chunkShops, error: csErr } = await q;
       if (csErr) return res.status(500).json({ error: csErr.message });
       if (chunkShops) activeShops.push(...chunkShops);
     }
 
     if (activeShops.length === 0) return res.status(200).json([]);
-    const activeShopIds = activeShops.map(s => s.id);
+    const activeShopIds = activeShops.map(s => s.id).filter(id => id != null);
     const activeShopMap = {};
     activeShops.forEach(s => { activeShopMap[s.id] = s; });
 
@@ -399,7 +455,7 @@ export default async function handler(req, res) {
     if (vErr) return res.status(500).json({ error: vErr.message });
 
     // Fetch visit_items in chunks of 200 (bypasses URL length limit)
-    const allVisitIds = visits.map(v => v.id);
+    const allVisitIds = visits.map(v => v.id).filter(id => id != null);
     const CHUNK = 200;
     const itemsMap = {};
     for (let ci = 0; ci < allVisitIds.length; ci += CHUNK) {
@@ -418,7 +474,18 @@ export default async function handler(req, res) {
     // ── Step 4: Aggregate all-time data per active shop ───────────────────
     const aggr = {};
     activeShopIds.forEach(id => {
-      aggr[id] = { visits: 0, sold: 0, not_sold_visits: 0, last_visit: null, by_sku: {}, trend: {}, period_sold: 0, period_by_sku: {} };
+      aggr[id] = {
+        visits: 0,
+        sold: 0,
+        not_sold_visits: 0,
+        last_visit: null,
+        by_sku: {},
+        trend: {},
+        period_sold: 0,
+        period_visits: 0,
+        period_not_sold_visits: 0,
+        period_by_sku: {},
+      };
     });
 
     visits.forEach(v => {
@@ -438,6 +505,8 @@ export default async function handler(req, res) {
       // Period-specific aggregation: used for sorting and top_sku
       if (periodVisitIdSet.has(v.id)) {
         a.period_sold += daySold;
+        a.period_visits += 1;
+        if (daySold === 0) a.period_not_sold_visits += 1;
         visitItems.forEach(i => {
           if (i.sold > 0) a.period_by_sku[i.product_id] = (a.period_by_sku[i.product_id] || 0) + i.sold;
         });
@@ -468,11 +537,14 @@ export default async function handler(req, res) {
           subregion_name: sr?.name || '—', region_name: regionMap[sr?.region_id] || '—',
           total_visits: a.visits, total_sold: a.sold,
           total_not_sold_visits: a.not_sold_visits,
+          period_visits: a.period_visits,                    // visits in the filtered period
+          period_not_sold_visits: a.period_not_sold_visits,  // not-sold visits in the filtered period
           last_visit_date: a.last_visit ? a.last_visit.slice(0, 10) : null,
           top_sku: periodBySku[0]?.sku || null,       // top SKU in the filtered period
           top_sku_sold: periodBySku[0]?.sold || 0,         // cartons for that SKU in the period
           period_sold: a.period_sold,                      // cartons sold in the filtered period
-          by_sku: bySku, trend,
+          by_sku: periodBySku,
+          trend,
         };
       })
       .filter(x => x)

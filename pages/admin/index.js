@@ -4,7 +4,6 @@ import { supabase } from '../../lib/supabaseClient';
 import { useBranding } from '../../lib/brandingContext';
 import styles from '../../styles/admin.module.css';
 import CompetitorAnalysisPanel from '../../components/admin/CompetitorAnalysisPanel';
-import ShopSalesTrend from '../../components/admin/ShopSalesTrend';
 import FuelManagement from './fuel-management';
 import ReportPreviewModal from '../../components/ReportPreviewModal';
 import MapFullscreenModal from '../../components/MapFullscreenModal';
@@ -1288,7 +1287,7 @@ function PerformanceTab({ token, primary, branding, regionFilter, isManager }) {
         : [];
       if (Array.isArray(userList)) { _perfCache.token = token; _perfCache.users = userList; setUsers(userList); }
       _perfCache.regions = regionsList; setRegions(regionsList);
-      _perfCache.subregions = subregionList; setSubregions(subregionList);
+      _perfCache.subregions = subregionList; setSubregions(subregions);
     });
   }, [token]);
 
@@ -3139,6 +3138,9 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
   const [custShopSearch,   setCustShopSearch]   = useState('');
   const custDebounceRef = useRef(null);
 
+  // ---- NEW PAGINATION STATE FOR SALES TRENDS ----
+  const [salesVisibleCount, setSalesVisibleCount] = useState(10);
+
   useEffect(() => { setRegionId(regionFilter || ''); }, [regionFilter]);
   useEffect(() => { setSubregionId(''); }, [regionId]);
 
@@ -3184,14 +3186,17 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
     setLoading(true); setError(''); setExpandedRow(null); setStockDebug(null);
     try {
       const params = new URLSearchParams({ mode: sec });
+      const safeValue = (value) => value != null && value !== '' && value !== 'null' && value !== 'undefined';
       if (sec !== 'stock') {
-        params.set('year',  yr);
-        params.set('month', mo);
+        if (!from && !to) {
+          if (safeValue(yr)) params.set('year', yr);
+          if (safeValue(mo)) params.set('month', mo);
+        }
+        if (safeValue(from))  params.set('dateFrom',     from);
+        if (safeValue(to))    params.set('dateTo',       to);
       }
-      if (from)  params.set('dateFrom',     from);
-      if (to)    params.set('dateTo',       to);
-      if (subId) params.set('subregion_id', subId);
-      if (regId) params.set('region_id',    regId);
+      if (safeValue(subId)) params.set('subregion_id', subId);
+      if (safeValue(regId)) params.set('region_id',    regId);
       const r = await fetch(`/api/admin/customer-analysis?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -3223,6 +3228,8 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
       if (rawVisits  !== null) setPeriodVisits(parseInt(rawVisits, 10));
       if (rawShops   !== null) setPeriodShops(parseInt(rawShops, 10));
       if (sec === 'stock') setCustStockVisible(10);
+      // Reset pagination on new data
+      setSalesVisibleCount(10);
     } catch { setError('Network error. Please try again.'); setRows([]); }
     finally { setLoading(false); }
   };
@@ -3351,7 +3358,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
       const bg = idx % 2 === 0 ? 'FFF8FAFC' : 'FFFFFFFF';
       const vals = isSales
         ? [idx+1, row.shop_name, row.shop_location, row.subregion_name,
-           row.total_visits, row.total_sold, row.total_not_sold_visits,
+           row.period_visits, row.period_sold, row.period_not_sold_visits,
            row.last_visit_date || '—', row.top_sku || '—']
         : [idx+1, row.shop_name, row.shop_location, row.subregion_name,
            row.total_uplifts, row.approved_uplifts, row.rejected_uplifts,
@@ -3413,8 +3420,8 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
   const summary = (() => {
     if (!rows.length || section === 'stock') return null;
     if (section === 'sales') {
-      const totalCartons = rows.reduce((a, b) => a + b.total_sold, 0);
-      const totalVisits  = rows.reduce((a, b) => a + b.total_visits, 0);
+      const totalCartons = rows.reduce((a, b) => a + (b.period_sold || 0), 0);
+      const totalVisits  = rows.reduce((a, b) => a + (b.period_visits || 0), 0);
       const topShop      = rows[0];
       const skuMap = {};
       rows.forEach(r => (Array.isArray(r.by_sku) ? r.by_sku : []).forEach(s => { skuMap[s.sku] = (skuMap[s.sku] || 0) + s.sold; }));
@@ -3429,6 +3436,12 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
       return { totalCartons, totalUplifts, totalApproved, approvalRate, topShop };
     }
   })();
+
+  // ---- Compute display rows for sales table ----
+  const displayRows = custShopSearch.trim()
+    ? rows.filter(r => (r.shop_name || '').toLowerCase().includes(custShopSearch.toLowerCase()))
+    : rows;
+  const visibleRows = displayRows.slice(0, salesVisibleCount);
 
   return (
     <div className={styles.custWrap}>
@@ -3466,13 +3479,6 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
             onClick={() => setSection('stock')}
           >
             📊 Stock Positions
-          </button>
-          <button
-            className={`${styles.custToggleBtn} ${section === 'insights' ? styles.custToggleActive : ''}`}
-            style={section === 'insights' ? { background: primary, borderColor: primary } : {}}
-            onClick={() => setSection('insights')}
-          >
-            ✨ Smart Visit Insights
           </button>
         </div>
       </div>
@@ -3523,9 +3529,9 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
           style={{ padding: '7px 12px', borderRadius: 8, border: '1px solid #e2e8f0', fontSize: '0.82rem', minWidth: 150, outline: 'none' }}
         />
       </div>
-      {section !== 'insights' && error && <div className={styles.alertDanger} style={{ margin: '0 0 16px' }}>{error}</div>}
+      {error && <div className={styles.alertDanger} style={{ margin: '0 0 16px' }}>{error}</div>}
 
-      {section !== 'insights' && !loading && summary && (
+      {!loading && summary && (
         <div className={styles.custSummary}>
           {section === 'sales' ? (
             <>
@@ -3546,7 +3552,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
               <div className={styles.custSummaryDivider} />
               <div className={styles.custSummaryItem}>
                 <span className={styles.custSummaryVal} style={{ fontSize: '0.95rem', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary.topShop?.shop_name || '—'}</span>
-                <span className={styles.custSummaryLabel}>Top Buying Shop ({(summary.topShop?.total_sold || 0).toLocaleString()} ctn)</span>
+                <span className={styles.custSummaryLabel}>Top Buying Shop ({(summary.topShop?.period_sold || 0).toLocaleString()} ctn)</span>
               </div>
               {summary.topSku && (
                 <>
@@ -3591,17 +3597,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
         </div>
       )}
 
-      {section === 'insights' ? (
-        <div className={styles.custTableWrap}>
-          <ShopSalesTrend
-          token={token} primary={primary} branding={branding}
-          externalYear={year} externalMonth={month}
-          externalDateFrom={dateFrom} externalDateTo={dateTo}
-          externalRegionId={regionId} externalSubregionId={subregionId}
-          externalShopSearch={custShopSearch}
-        />
-        </div>
-      ) : loading ? (
+      {loading ? (
         <div className={styles.custEmpty}>⏳ Loading customer data…</div>
       ) : rows.length === 0 ? (
         <div className={styles.custEmpty}>
@@ -3676,182 +3672,447 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                 Powered By Indomie
               </div>
             </>
-          ) : (
-            <table className={styles.custTable}>
-              <thead>
-              <tr>
-                <th style={{ width: 36 }}>#</th>
-                <th>Shop</th>
-                <th>Subregion</th>
-                {section === 'sales' ? (
-                  <>
+          ) : section === 'sales' ? (
+            // ---- UPDATED SALES TRENDS TABLE WITH PAGINATION (Top SKUs column removed) ----
+            <>
+              <table className={styles.custTable}>
+                <thead>
+                  <tr>
+                    <th style={{ width: 36 }}>#</th>
+                    <th>Shop</th>
+                    <th>Subregion</th>
                     <th className={styles.custThNum}>Visits</th>
                     <th className={styles.custThNum}>Cartons Sold</th>
                     <th className={styles.custThNum}>Not-Sold Visits</th>
                     <th className={styles.custThNum}>Last Visit</th>
-                  </>
-                ) : (
-                  <>
-                    <th className={styles.custThNum}>Requests</th>
-                    <th className={styles.custThNum}>Cartons</th>
-                    <th className={styles.custThNum} style={{ color: '#16a34a' }}>Approved</th>
-                    <th className={styles.custThNum} style={{ color: '#dc2626' }}>Rejected</th>
-                    <th className={styles.custThNum} style={{ color: '#f59e0b' }}>Pending</th>
-                    <th className={styles.custThNum}>Last Uplift</th>
-                  </>
-                )}
-                <th style={{ minWidth: 180 }}>Top SKUs</th>
-                <th style={{ width: 36 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {(custShopSearch.trim()
-                ? rows.filter(r => (r.shop_name || '').toLowerCase().includes(custShopSearch.toLowerCase()))
-                : rows
-              ).map((row, idx) => {
-                const isExpanded = expandedRow === row.shop_id;
-                const topSkus    = (row.by_sku || []).slice(0, 3);
-                return (
-                  <React.Fragment key={row.shop_id}>
-                    <tr
-                      key={row.shop_id}
-                      className={`${styles.custRow} ${isExpanded ? styles.custRowExpanded : ''}`}
-                      onClick={() => setExpandedRow(isExpanded ? null : row.shop_id)}
-                    >
-                      <td className={styles.custTdIdx}>{idx + 1}</td>
-                      <td>
-                        <div className={styles.custShopCell}>
-                          <div className={styles.custShopAvatar} style={{ background: `${primary}22`, color: primary }}>
-                            {(row.shop_name || 'S').charAt(0).toUpperCase()}
-                          </div>
-                          <div>
-                            <div className={styles.custShopName}>{row.shop_name}</div>
-                            {row.shop_location && <div className={styles.custShopLoc}>📍 {row.shop_location}</div>}
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <span className={styles.custSubregionBadge}>{row.subregion_name}</span>
-                      </td>
-                      {section === 'sales' ? (
-                        <>
-                          <td className={styles.custTdNum}>{row.total_visits}</td>
+                    {/* removed <th style={{ minWidth: 180 }}>Top SKUs</th> */}
+                    <th style={{ width: 36 }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRows.map((row, idx) => {
+                    const isExpanded = expandedRow === row.shop_id;
+                    // removed const topSkus = ...
+                    return (
+                      <React.Fragment key={row.shop_id}>
+                        <tr
+                          className={`${styles.custRow} ${isExpanded ? styles.custRowExpanded : ''}`}
+                          onClick={() => setExpandedRow(isExpanded ? null : row.shop_id)}
+                        >
+                          <td className={styles.custTdIdx}>{idx + 1}</td>
+                          <td>
+                            <div className={styles.custShopCell}>
+                              <div className={styles.custShopAvatar} style={{ background: `${primary}22`, color: primary }}>
+                                {(row.shop_name || 'S').charAt(0).toUpperCase()}
+                              </div>
+                              <div>
+                                <div className={styles.custShopName}>{row.shop_name}</div>
+                                {row.shop_location && <div className={styles.custShopLoc}>📍 {row.shop_location}</div>}
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <span className={styles.custSubregionBadge}>{row.subregion_name}</span>
+                          </td>
+                          <td className={styles.custTdNum}>{row.period_visits}</td>
                           <td className={styles.custTdNum}>
-                            <strong style={{ color: '#0f172a' }}>{(row.total_sold || 0).toLocaleString()}</strong>
+                            <strong style={{ color: '#0f172a' }}>{(row.period_sold || 0).toLocaleString()}</strong>
                             <span style={{ color: '#94a3b8', fontSize: '0.72rem' }}> ctn</span>
                           </td>
                           <td className={styles.custTdNum}>
-                            {row.total_not_sold_visits > 0
-                              ? <span style={{ color: '#ef4444' }}>{row.total_not_sold_visits}</span>
+                            {row.period_not_sold_visits > 0
+                              ? <span style={{ color: '#ef4444' }}>{row.period_not_sold_visits}</span>
                               : <span style={{ color: '#94a3b8' }}>—</span>}
                           </td>
                           <td className={styles.custTdNum} style={{ color: '#64748b', fontSize: '0.82rem' }}>{row.last_visit_date || '—'}</td>
-                        </>
-                      ) : (
-                        <>
-                          <td className={styles.custTdNum}>{row.total_uplifts}</td>
-                          <td className={styles.custTdNum}>
-                            <strong style={{ color: '#0f172a' }}>{(row.total_cartons_uplifted || 0).toLocaleString()}</strong>
-                            <span style={{ color: '#94a3b8', fontSize: '0.72rem' }}> ctn</span>
+                          {/* removed <td> with SKU list */}
+                          <td className={styles.custTdExpand}>
+                            <span className={`${styles.custExpandChevron} ${isExpanded ? styles.custExpandChevronOpen : ''}`}>▾</span>
                           </td>
-                          <td className={styles.custTdNum}>
-                            <span className={styles.custBadgeApproved}>{row.approved_uplifts}</span>
-                          </td>
-                          <td className={styles.custTdNum}>
-                            {row.rejected_uplifts > 0
-                              ? <span className={styles.custBadgeRejected}>{row.rejected_uplifts}</span>
-                              : <span style={{ color: '#94a3b8' }}>—</span>}
-                          </td>
-                          <td className={styles.custTdNum}>
-                            {row.pending_uplifts > 0
-                              ? <span className={styles.custBadgePending}>{row.pending_uplifts}</span>
-                              : <span style={{ color: '#94a3b8' }}>—</span>}
-                          </td>
-                          <td className={styles.custTdNum} style={{ color: '#64748b', fontSize: '0.82rem' }}>{row.last_uplift_date || '—'}</td>
-                        </>
-                      )}
-                      <td>
-                        <div className={styles.custSkuList}>
-                          {topSkus.map((s, i) => (
-                            <span key={s.sku} className={styles.custSkuChip} style={{ background: CHART_COLORS[i % CHART_COLORS.length] + '18', color: CHART_COLORS[i % CHART_COLORS.length] }}>
-                              {s.sku}
-                              <span className={styles.custSkuQty}>{section === 'sales' ? s.sold : s.cartons}</span>
-                            </span>
-                          ))}
-                          {Array.isArray(row.by_sku) && row.by_sku.length > 3 && (
-                            <span className={styles.custSkuMore}>+{row.by_sku.length - 3}</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className={styles.custTdExpand}>
-                        <span className={`${styles.custExpandChevron} ${isExpanded ? styles.custExpandChevronOpen : ''}`}>▾</span>
-                      </td>
-                    </tr>
+                        </tr>
 
-                    {isExpanded && (
-                      <tr key={`${row.shop_id}-detail`} className={styles.custDetailRow}>
-                        <td colSpan={section === 'sales' ? 9 : 12}>
-                          <div className={styles.custDetailWrap}>
-                            <div className={styles.custDetailHeader}>
-                              {section === 'sales' ? '🛒 Full SKU Purchase Breakdown' : '📦 Full SKU Uplift Breakdown'}
-                              {row.trend?.length > 0 && (
-                                <span style={{ marginLeft: 16, fontSize: '0.78rem', color: '#94a3b8' }}>
-                                  {row.trend.length} active day{row.trend.length !== 1 ? 's' : ''} in period
-                                </span>
-                              )}
-                            </div>
-
-                            {row.by_sku.length === 0 ? (
-                              <p style={{ color: '#94a3b8', margin: 0 }}>No SKU data available.</p>
-                            ) : (
-                              <div className={styles.custDetailSkuGrid}>
-                                {row.by_sku.map((s, i) => {
-                                  const maxQty = row.by_sku[0] ? (section === 'sales' ? row.by_sku[0].sold : row.by_sku[0].cartons) : 1;
-                                  const qty    = section === 'sales' ? s.sold : s.cartons;
-                                  const pct    = maxQty > 0 ? Math.round(qty / maxQty * 100) : 0;
-                                  const color  = CHART_COLORS[i % CHART_COLORS.length];
-                                  return (
-                                    <div key={s.sku} className={styles.custDetailSkuRow}>
-                                      <div className={styles.custDetailSkuInfo}>
-                                        <span className={styles.custDetailSkuPill} style={{ background: color + '18', color }}>{s.sku}</span>
-                                        <span className={styles.custDetailSkuName}>{s.name}</span>
-                                      </div>
-                                      <div className={styles.custDetailBar}>
-                                        <div className={styles.custDetailBarTrack}>
-                                          <div className={styles.custDetailBarFill} style={{ width: `${pct}%`, background: color }} />
-                                        </div>
-                                        <span className={styles.custDetailBarLabel}>
-                                          {qty.toLocaleString()} <span style={{ color: '#94a3b8' }}>ctn</span>
-                                        </span>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
-
-                            {row.trend?.length > 0 && (
-                              <div className={styles.custTrendWrap}>
-                                <div className={styles.custTrendTitle}>Recent Activity</div>
-                                <div className={styles.custTrendList}>
-                                  {[...row.trend].slice(-7).map(t => (
-                                    <div key={t.date} className={styles.custTrendItem}>
-                                      <span className={styles.custTrendDate}>{t.date.slice(5)}</span>
-                                      <div className={styles.custTrendBar} style={{ height: Math.max(4, Math.round((section === 'sales' ? t.sold : t.cartons) / Math.max(...row.trend.map(x => section === 'sales' ? x.sold : x.cartons)) * 40)), background: primary }} />
-                                      <span className={styles.custTrendVal}>{section === 'sales' ? t.sold : t.cartons}</span>
-                                    </div>
-                                  ))}
+                        {isExpanded && (
+                          <tr className={styles.custDetailRow}>
+                            <td colSpan={8}> {/* changed from 9 to 8 */}
+                              <div className={styles.custDetailWrap}>
+                                <div className={styles.custDetailHeader}>
+                                  🛒 Full SKU Purchase Breakdown
+                                  {row.trend?.length > 0 && (
+                                    <span style={{ marginLeft: 16, fontSize: '0.78rem', color: '#94a3b8' }}>
+                                      {row.trend.length} active day{row.trend.length !== 1 ? 's' : ''} in period
+                                    </span>
+                                  )}
                                 </div>
+
+                                {row.by_sku.length === 0 ? (
+                                  <p style={{ color: '#94a3b8', margin: 0 }}>No SKU data available.</p>
+                                ) : (
+                                  <div className={styles.custDetailSkuGrid}>
+                                    {row.by_sku.map((s, i) => {
+                                      const maxQty = row.by_sku[0] ? row.by_sku[0].sold : 1;
+                                      const qty    = s.sold;
+                                      const pct    = maxQty > 0 ? Math.round(qty / maxQty * 100) : 0;
+                                      const color  = CHART_COLORS[i % CHART_COLORS.length];
+                                      return (
+                                        <div key={s.sku} className={styles.custDetailSkuRow}>
+                                          <div className={styles.custDetailSkuInfo}>
+                                            <span className={styles.custDetailSkuPill} style={{ background: color + '18', color }}>{s.sku}</span>
+                                            <span className={styles.custDetailSkuName}>{s.name}</span>
+                                          </div>
+                                          <div className={styles.custDetailBar}>
+                                            <div className={styles.custDetailBarTrack}>
+                                              <div className={styles.custDetailBarFill} style={{ width: `${pct}%`, background: color }} />
+                                            </div>
+                                            <span className={styles.custDetailBarLabel}>
+                                              {qty.toLocaleString()} <span style={{ color: '#94a3b8' }}>ctn</span>
+                                            </span>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+
+                                {row.trend?.length > 0 && (
+                                  <div className={styles.custTrendWrap}>
+                                    <div className={styles.custTrendTitle}>
+                                      Last 12 Visits — {(() => {
+                                        const trendPoints = row.trend.slice(-12);
+                                        const firstValue = trendPoints[0]?.sold != null
+                                          ? trendPoints[0].sold
+                                          : (trendPoints[0]?.cartons ?? 0);
+                                        const lastValue = trendPoints[trendPoints.length - 1]?.sold != null
+                                          ? trendPoints[trendPoints.length - 1].sold
+                                          : (trendPoints[trendPoints.length - 1]?.cartons ?? 0);
+                                        const direction = lastValue > firstValue
+                                          ? 'Increasing'
+                                          : lastValue < firstValue
+                                            ? 'Decreasing'
+                                            : 'Stable';
+                                        const color = direction === 'Increasing'
+                                          ? '#16a34a'
+                                          : direction === 'Decreasing'
+                                            ? '#dc2626'
+                                            : '#f59e0b';
+                                        return <span style={{ color }}>{direction}</span>;
+                                      })()}
+                                    </div>
+                                    <div className={styles.custTrendLineChart}>
+                                      {(() => {
+                                        const recentPoints = row.trend.slice(-12).map((t, idx) => ({
+                                          date: t.date,
+                                          value: t.sold != null ? t.sold : (t.cartons ?? 0),
+                                          idx,
+                                        }));
+
+                                        if (!recentPoints.length) return null;
+                                        const maxVal = Math.max(...recentPoints.map(p => p.value), 1);
+                                        const width = Math.max(220, recentPoints.length * 56);
+                                        const topPadding = 26;
+                                        const bottomPadding = 34;
+                                        const chartHeight = 60;
+                                        const height = topPadding + chartHeight + bottomPadding;
+                                        const xSpan = width - 24;
+                                        const xStep = recentPoints.length > 1 ? xSpan / (recentPoints.length - 1) : 0;
+                                        const baselineY = topPadding + chartHeight;
+
+                                        const coords = recentPoints.map((p) => {
+                                          const x = 12 + p.idx * xStep;
+                                          const y = topPadding + chartHeight - (p.value / maxVal) * chartHeight;
+                                          return { ...p, x, y };
+                                        });
+                                        const polyPoints = coords.map(p => `${p.x},${p.y}`).join(' ');
+
+                                        return (
+                                          <div style={{ width: '100%', overflowX: 'auto' }}>
+                                            <svg width={width} height={height} style={{ display: 'block' }}>
+                                              <line x1={12} y1={baselineY} x2={width - 12} y2={baselineY} stroke="#cbd5e1" strokeWidth="1" />
+                                              <polyline
+                                                points={polyPoints}
+                                                fill="none"
+                                                stroke={primary}
+                                                strokeWidth="2"
+                                                strokeLinejoin="round"
+                                                strokeLinecap="round"
+                                              />
+                                              {coords.map((p) => (
+                                                <g key={p.date}>
+                                                  <circle cx={p.x} cy={p.y} r="4" fill={primary} />
+                                                  <text x={p.x} y={Math.max(12, p.y - 10)} textAnchor="middle" fontSize="10" fill={primary} fontWeight="700">
+                                                    {p.value}
+                                                  </text>
+                                                  <text x={p.x} y={baselineY + 18} textAnchor="middle" fontSize="10" fill="#64748b">
+                                                    {p.date.slice(5)}
+                                                  </text>
+                                                </g>
+                                              ))}
+                                            </svg>
+                                            <div style={{ marginTop: 8, fontSize: '0.82rem', color: '#475569' }}>
+                                              Lifetime Cartons Sold: <strong>{(row.total_sold || 0).toLocaleString()}</strong> ctn
+                                              <span style={{ margin: '0 8px', color: '#94a3b8' }}>·</span>
+                                              Lifetime Visits: <strong>{(row.total_visits || 0).toLocaleString()}</strong>
+                                            </div>
+                                          </div>
+                                        );
+                                      })()}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {/* ---- PAGINATION BUTTONS ---- */}
+              {displayRows.length > 10 && (
+                <div style={{ textAlign: 'center', marginTop: 16, marginBottom: 8 }}>
+                  {salesVisibleCount < displayRows.length ? (
+                    <button
+                      onClick={() => setSalesVisibleCount(prev => Math.min(prev + 10, displayRows.length))}
+                      style={{
+                        padding: '8px 28px', borderRadius: 20,
+                        border: `1.5px solid ${primary}`,
+                        background: '#fff', color: primary,
+                        fontWeight: 700, fontSize: '0.82rem',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      &#9660; Load {Math.min(10, displayRows.length - salesVisibleCount)} more
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setSalesVisibleCount(10)}
+                      style={{
+                        padding: '8px 28px', borderRadius: 20,
+                        border: `1.5px solid ${primary}`,
+                        background: '#fff', color: primary,
+                        fontWeight: 700, fontSize: '0.82rem',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      &#9650; Show less
+                    </button>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            // ---- UPLIFTS TABLE (unchanged) ----
+            <table className={styles.custTable}>
+              <thead>
+                <tr>
+                  <th style={{ width: 36 }}>#</th>
+                  <th>Shop</th>
+                  <th>Subregion</th>
+                  <th className={styles.custThNum}>Requests</th>
+                  <th className={styles.custThNum}>Cartons</th>
+                  <th className={styles.custThNum} style={{ color: '#16a34a' }}>Approved</th>
+                  <th className={styles.custThNum} style={{ color: '#dc2626' }}>Rejected</th>
+                  <th className={styles.custThNum} style={{ color: '#f59e0b' }}>Pending</th>
+                  <th className={styles.custThNum}>Last Uplift</th>
+                  <th style={{ minWidth: 180 }}>Top SKUs</th>
+                  <th style={{ width: 36 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, idx) => {
+                  const isExpanded = expandedRow === row.shop_id;
+                  const topSkus    = (row.by_sku || []).slice(0, 3);
+                  return (
+                    <React.Fragment key={row.shop_id}>
+                      <tr
+                        className={`${styles.custRow} ${isExpanded ? styles.custRowExpanded : ''}`}
+                        onClick={() => setExpandedRow(isExpanded ? null : row.shop_id)}
+                      >
+                        <td className={styles.custTdIdx}>{idx + 1}</td>
+                        <td>
+                          <div className={styles.custShopCell}>
+                            <div className={styles.custShopAvatar} style={{ background: `${primary}22`, color: primary }}>
+                              {(row.shop_name || 'S').charAt(0).toUpperCase()}
+                            </div>
+                            <div>
+                              <div className={styles.custShopName}>{row.shop_name}</div>
+                              {row.shop_location && <div className={styles.custShopLoc}>📍 {row.shop_location}</div>}
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <span className={styles.custSubregionBadge}>{row.subregion_name}</span>
+                        </td>
+                        <td className={styles.custTdNum}>{row.total_uplifts}</td>
+                        <td className={styles.custTdNum}>
+                          <strong style={{ color: '#0f172a' }}>{(row.total_cartons_uplifted || 0).toLocaleString()}</strong>
+                          <span style={{ color: '#94a3b8', fontSize: '0.72rem' }}> ctn</span>
+                        </td>
+                        <td className={styles.custTdNum}>
+                          <span className={styles.custBadgeApproved}>{row.approved_uplifts}</span>
+                        </td>
+                        <td className={styles.custTdNum}>
+                          {row.rejected_uplifts > 0
+                            ? <span className={styles.custBadgeRejected}>{row.rejected_uplifts}</span>
+                            : <span style={{ color: '#94a3b8' }}>—</span>}
+                        </td>
+                        <td className={styles.custTdNum}>
+                          {row.pending_uplifts > 0
+                            ? <span className={styles.custBadgePending}>{row.pending_uplifts}</span>
+                            : <span style={{ color: '#94a3b8' }}>—</span>}
+                        </td>
+                        <td className={styles.custTdNum} style={{ color: '#64748b', fontSize: '0.82rem' }}>{row.last_uplift_date || '—'}</td>
+                        <td>
+                          <div className={styles.custSkuList}>
+                            {topSkus.map((s, i) => (
+                              <span key={s.sku} className={styles.custSkuChip} style={{ background: CHART_COLORS[i % CHART_COLORS.length] + '18', color: CHART_COLORS[i % CHART_COLORS.length] }}>
+                                {s.sku}
+                                <span className={styles.custSkuQty}>{s.cartons}</span>
+                              </span>
+                            ))}
+                            {Array.isArray(row.by_sku) && row.by_sku.length > 3 && (
+                              <span className={styles.custSkuMore}>+{row.by_sku.length - 3}</span>
                             )}
                           </div>
                         </td>
+                        <td className={styles.custTdExpand}>
+                          <span className={`${styles.custExpandChevron} ${isExpanded ? styles.custExpandChevronOpen : ''}`}>▾</span>
+                        </td>
                       </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
+
+                      {isExpanded && (
+                        <tr className={styles.custDetailRow}>
+                          <td colSpan={11}>
+                            <div className={styles.custDetailWrap}>
+                              <div className={styles.custDetailHeader}>
+                                📦 Full SKU Uplift Breakdown
+                                {row.trend?.length > 0 && (
+                                  <span style={{ marginLeft: 16, fontSize: '0.78rem', color: '#94a3b8' }}>
+                                    {row.trend.length} active day{row.trend.length !== 1 ? 's' : ''} in period
+                                  </span>
+                                )}
+                              </div>
+
+                              {row.by_sku.length === 0 ? (
+                                <p style={{ color: '#94a3b8', margin: 0 }}>No SKU data available.</p>
+                              ) : (
+                                <div className={styles.custDetailSkuGrid}>
+                                  {row.by_sku.map((s, i) => {
+                                    const maxQty = row.by_sku[0] ? row.by_sku[0].cartons : 1;
+                                    const qty    = s.cartons;
+                                    const pct    = maxQty > 0 ? Math.round(qty / maxQty * 100) : 0;
+                                    const color  = CHART_COLORS[i % CHART_COLORS.length];
+                                    return (
+                                      <div key={s.sku} className={styles.custDetailSkuRow}>
+                                        <div className={styles.custDetailSkuInfo}>
+                                          <span className={styles.custDetailSkuPill} style={{ background: color + '18', color }}>{s.sku}</span>
+                                          <span className={styles.custDetailSkuName}>{s.name}</span>
+                                        </div>
+                                        <div className={styles.custDetailBar}>
+                                          <div className={styles.custDetailBarTrack}>
+                                            <div className={styles.custDetailBarFill} style={{ width: `${pct}%`, background: color }} />
+                                          </div>
+                                          <span className={styles.custDetailBarLabel}>
+                                            {qty.toLocaleString()} <span style={{ color: '#94a3b8' }}>ctn</span>
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              {row.trend?.length > 0 && (
+                                <div className={styles.custTrendWrap}>
+                                  <div className={styles.custTrendTitle}>
+                                    Recent Activity — {(() => {
+                                      const trendPoints = row.trend.slice(-12);
+                                      const firstValue = trendPoints[0]?.sold != null
+                                        ? trendPoints[0].sold
+                                        : (trendPoints[0]?.cartons ?? 0);
+                                      const lastValue = trendPoints[trendPoints.length - 1]?.sold != null
+                                        ? trendPoints[trendPoints.length - 1].sold
+                                        : (trendPoints[trendPoints.length - 1]?.cartons ?? 0);
+                                      const direction = lastValue > firstValue
+                                        ? 'Increasing'
+                                        : lastValue < firstValue
+                                          ? 'Decreasing'
+                                          : 'Stable';
+                                      const color = direction === 'Increasing'
+                                        ? '#16a34a'
+                                        : direction === 'Decreasing'
+                                          ? '#dc2626'
+                                          : '#f59e0b';
+                                      return <span style={{ color }}>{direction}</span>;
+                                    })()}
+                                  </div>
+                                  <div className={styles.custTrendLineChart}>
+                                    {(() => {
+                                      const recentPoints = row.trend.slice(-12).map((t, idx) => ({
+                                        date: t.date,
+                                        value: t.sold != null ? t.sold : (t.cartons ?? 0),
+                                        idx,
+                                      }));
+
+                                      if (!recentPoints.length) return null;
+                                      const maxVal = Math.max(...recentPoints.map(p => p.value), 1);
+                                      const width = Math.max(220, recentPoints.length * 56);
+                                      const topPadding = 26;
+                                      const bottomPadding = 34;
+                                      const chartHeight = 60;
+                                      const height = topPadding + chartHeight + bottomPadding;
+                                      const xSpan = width - 24;
+                                      const xStep = recentPoints.length > 1 ? xSpan / (recentPoints.length - 1) : 0;
+                                      const baselineY = topPadding + chartHeight;
+
+                                      const coords = recentPoints.map((p) => {
+                                        const x = 12 + p.idx * xStep;
+                                        const y = topPadding + chartHeight - (p.value / maxVal) * chartHeight;
+                                        return { ...p, x, y };
+                                      });
+                                      const polyPoints = coords.map(p => `${p.x},${p.y}`).join(' ');
+
+                                      return (
+                                        <div style={{ width: '100%', overflowX: 'auto' }}>
+                                          <svg width={width} height={height} style={{ display: 'block' }}>
+                                            <line x1={12} y1={baselineY} x2={width - 12} y2={baselineY} stroke="#cbd5e1" strokeWidth="1" />
+                                            <polyline
+                                              points={polyPoints}
+                                              fill="none"
+                                              stroke={primary}
+                                              strokeWidth="2"
+                                              strokeLinejoin="round"
+                                              strokeLinecap="round"
+                                            />
+                                            {coords.map((p) => (
+                                              <g key={p.date}>
+                                                <circle cx={p.x} cy={p.y} r="4" fill={primary} />
+                                                <text x={p.x} y={Math.max(12, p.y - 10)} textAnchor="middle" fontSize="10" fill={primary} fontWeight="700">
+                                                  {p.value}
+                                                </text>
+                                                <text x={p.x} y={baselineY + 18} textAnchor="middle" fontSize="10" fill="#64748b">
+                                                  {p.date.slice(5)}
+                                                </text>
+                                              </g>
+                                            ))}
+                                          </svg>
+                                          <div style={{ marginTop: 8, fontSize: '0.82rem', color: '#475569' }}>
+                                            Lifetime Cartons Sold: <strong>{(row.total_sold || 0).toLocaleString()}</strong> ctn
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
             </table>
           )}
         </div>
@@ -3878,7 +4139,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
               })
             : section === 'uplifts'
             ? rows.map((r, i) => [i + 1, r.shop_name, r.shop_location || '', r.subregion_name, r.total_uplifts, r.approved_uplifts, r.rejected_uplifts, r.pending_uplifts, r.total_cartons_uplifted, r.last_uplift_date || '—'])
-            : rows.map((r, i) => [i + 1, r.shop_name, r.shop_location || '', r.subregion_name, r.total_visits, r.total_sold, r.total_not_sold_visits, r.last_visit_date || '—', r.top_sku || '—'])
+            : rows.map((r, i) => [i + 1, r.shop_name, r.shop_location || '', r.subregion_name, r.period_visits, r.period_sold, r.period_not_sold_visits, r.last_visit_date || '—', r.top_sku || '—'])
         }
         onExport={handleExcelExport}
       />
@@ -4232,7 +4493,7 @@ function MapTab({ token, primary, accent, regionFilter }) {
         leafletMapRef.current.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
       }
     });
-  }, [markers, mapReady, showOnlyUnvisited, showAllShops]); // <-- added showAllShops as dependency
+  }, [markers, mapReady, showOnlyUnvisited, showAllShops]);
 
   const fetchData = useCallback(async () => {
     setLoading(true); setError(''); setActiveMarker(null); setShowOnlyUnvisited(false);

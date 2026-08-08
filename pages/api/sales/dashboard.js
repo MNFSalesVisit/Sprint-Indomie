@@ -33,30 +33,56 @@ export default async function handler(req, res) {
 
   try {
     // ── MTD visits (sales type only) ────────────────────────────────────────────
-    const { data: mtdVisits, error: visitsErr } = await adminSupabase
-      .from('visits')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('visit_type', 'sales')
-      .gte('created_at', isoStart);
-    if (visitsErr) throw visitsErr;
+    const VISIT_PAGE_SIZE = 1000;
+    const mtdVisits = [];
+    let visitPage = 0;
 
-    const visitsMTD = mtdVisits?.length ?? 0;
-    const visitIds  = (mtdVisits || []).map(v => v.id);
+    while (true) {
+      const { data: visitBatch, error: visitsErr } = await adminSupabase
+        .from('visits')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('visit_type', 'sales')
+        .gte('created_at', isoStart)
+        .range(visitPage * VISIT_PAGE_SIZE, (visitPage + 1) * VISIT_PAGE_SIZE - 1);
+      if (visitsErr) throw visitsErr;
+      if (!visitBatch || visitBatch.length === 0) break;
+
+      mtdVisits.push(...visitBatch);
+      if (visitBatch.length < VISIT_PAGE_SIZE) break;
+      visitPage += 1;
+    }
+
+    const visitsMTD = mtdVisits.length;
+    const visitIds  = mtdVisits.map(v => v.id);
 
     // ── Converted visits: visits that have at least one item with sold > 0 ─────
     let convertedMTD = 0;
     if (visitIds.length > 0) {
-      const { data: soldItems, error: soldErr } = await adminSupabase
-        .from('visit_items')
-        .select('visit_id')
-        .in('visit_id', visitIds)
-        .gt('sold', 0);
-      if (soldErr) throw soldErr;
+      const VISIT_ITEM_CHUNK = 1000;
+      const soldVisitIds = new Set();
 
-      // Count distinct visit_ids
-      const uniqueConverted = new Set((soldItems || []).map(r => r.visit_id));
-      convertedMTD = uniqueConverted.size;
+      for (let i = 0; i < visitIds.length; i += VISIT_ITEM_CHUNK) {
+        const chunk = visitIds.slice(i, i + VISIT_ITEM_CHUNK);
+        let itemOffset = 0;
+
+        while (true) {
+          const { data: soldItems, error: soldErr } = await adminSupabase
+            .from('visit_items')
+            .select('visit_id')
+            .in('visit_id', chunk)
+            .gt('sold', 0)
+            .range(itemOffset, itemOffset + VISIT_PAGE_SIZE - 1);
+          if (soldErr) throw soldErr;
+          if (!soldItems || soldItems.length === 0) break;
+
+          soldItems.forEach(r => soldVisitIds.add(r.visit_id));
+          if (soldItems.length < VISIT_PAGE_SIZE) break;
+          itemOffset += VISIT_PAGE_SIZE;
+        }
+      }
+
+      convertedMTD = soldVisitIds.size;
     }
 
     const conversionPct = visitsMTD > 0

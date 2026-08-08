@@ -5,6 +5,13 @@ const adminSupabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
+function parseDateOnlyUTC(value) {
+  if (!value) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
 async function verifyAdmin(token) {
   const { data: { user }, error } = await adminSupabase.auth.getUser(token);
   if (error || !user) return null;
@@ -50,8 +57,14 @@ export default async function handler(req, res) {
       .eq('visit_type', 'sales')
       .order('created_at', { ascending: true });
 
-    if (dateFrom) visitsQ = visitsQ.gte('created_at', new Date(dateFrom + 'T00:00:00').toISOString());
-    if (dateTo)   visitsQ = visitsQ.lte('created_at', new Date(dateTo + 'T23:59:59.999').toISOString());
+    if (dateFrom) {
+      const startDate = parseDateOnlyUTC(dateFrom);
+      if (startDate) visitsQ = visitsQ.gte('created_at', startDate.toISOString());
+    }
+    if (dateTo) {
+      const toDate = parseDateOnlyUTC(dateTo);
+      if (toDate) visitsQ = visitsQ.lt('created_at', new Date(Date.UTC(toDate.getUTCFullYear(), toDate.getUTCMonth(), toDate.getUTCDate() + 1)).toISOString());
+    }
     if (sales_rep) visitsQ = visitsQ.eq('user_id', sales_rep);
 
     const { data: visits, error: vErr } = await visitsQ;

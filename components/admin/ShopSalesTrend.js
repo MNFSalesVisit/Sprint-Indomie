@@ -15,13 +15,21 @@ function getTrend(trendData) {
   return { label: '⚖️ Stable', color: '#f59e0b' };
 }
 
+// ── NEW / UPDATED TrendChart ──
 function TrendChart({ data, color }) {
   if (!data || data.length < 2) {
     return <span style={{ color: '#9ca3af', fontSize: '0.78rem' }}>Not enough data points</span>;
   }
-  const W = 260, H = 72;
+
+  // Dynamic width: minimum 260px, add 12px per data point
+  const H = 72;
+  const baseWidth = 260;
+  const perPoint = 12;
+  const W = Math.max(baseWidth, data.length * perPoint);
+
   const maxV = Math.max(...data.map(d => d.sold), 1);
   const xStep = (W - 8) / (data.length - 1);
+
   const pts = data
     .map((d, i) => {
       const x = (4 + i * xStep).toFixed(1);
@@ -29,22 +37,25 @@ function TrendChart({ data, color }) {
       return `${x},${y}`;
     })
     .join(' ');
+
   return (
-    <svg width={W} height={H} style={{ display: 'block', overflow: 'visible' }}>
-      <polyline
-        points={pts}
-        fill="none"
-        stroke={color}
-        strokeWidth="2"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-      {data.map((d, i) => {
-        const cx = (4 + i * xStep).toFixed(1);
-        const cy = (H - 6 - (d.sold / maxV) * (H - 12)).toFixed(1);
-        return <circle key={i} cx={cx} cy={cy} r="3" fill={color} />;
-      })}
-    </svg>
+    <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
+      <svg width={W} height={H} style={{ display: 'block' }}>
+        <polyline
+          points={pts}
+          fill="none"
+          stroke={color}
+          strokeWidth="2"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        {data.map((d, i) => {
+          const cx = (4 + i * xStep).toFixed(1);
+          const cy = (H - 6 - (d.sold / maxV) * (H - 12)).toFixed(1);
+          return <circle key={i} cx={cx} cy={cy} r="3" fill={color} />;
+        })}
+      </svg>
+    </div>
   );
 }
 
@@ -90,6 +101,7 @@ export default function ShopSalesTrend({
   const [error, setError]     = useState('');
   const [expanded, setExpanded] = useState({});
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(10); // pagination
 
   // Filter state
   const isExternal = !!(externalYear || externalMonth || externalRegionId || externalSubregionId || externalDateFrom || externalDateTo);
@@ -130,7 +142,6 @@ export default function ShopSalesTrend({
       setRegions(regionsList);
       if (Array.isArray(userList)) setUsers(userList);
       if (regionsList.length === 0) return;
-      // Fetch subregions for each region
       const allSubs = await Promise.all(
         regionsList.map(reg =>
           fetch(`/api/admin/map-regions?region_id=${reg.id}`, { headers: authHeader })
@@ -144,23 +155,25 @@ export default function ShopSalesTrend({
   // ── Build query string ─────────────────────────────────────────────────────
   const buildQuery = useCallback(() => {
     const qs = new URLSearchParams({ mode: 'sales' });
-    if (dateFrom) {
+    const safeValue = (value) => value != null && value !== '' && value !== 'null' && value !== 'undefined';
+    if (safeValue(dateFrom)) {
       qs.set('dateFrom', dateFrom);
-      if (dateTo) qs.set('dateTo', dateTo);
-    } else if (year && month) {
+      if (safeValue(dateTo)) qs.set('dateTo', dateTo);
+    } else if (safeValue(year) && safeValue(month)) {
       const y = parseInt(year, 10), m = parseInt(month, 10);
       qs.set('dateFrom', new Date(y, m - 1, 1).toISOString().slice(0, 10));
       qs.set('dateTo', new Date(y, m, 0).toISOString().slice(0, 10));
     }
-    if (regionId)    qs.set('region_id', regionId);
-    if (subregionId) qs.set('subregion_id', subregionId);
-    if (userId)      qs.set('user_id', userId);
+    if (safeValue(regionId))    qs.set('region_id', regionId);
+    if (safeValue(subregionId)) qs.set('subregion_id', subregionId);
+    if (safeValue(userId))      qs.set('user_id', userId);
     return qs.toString();
   }, [year, month, dateFrom, dateTo, regionId, subregionId, userId]);
 
   // ── Load data ──────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
     setLoading(true); setError(''); setRows([]); setExpanded({});
+    setVisibleCount(10);
     try {
       const res = await fetch(`/api/admin/customer-analysis?${buildQuery()}`, { headers: authHeader });
       if (!res.ok) {
@@ -200,7 +213,7 @@ export default function ShopSalesTrend({
         { header: 'Cartons Sold', key: 'cartons',  width: 14 },
         { header: 'Efficiency %', key: 'eff',      width: 14 },
         { header: 'Trend',        key: 'trend',    width: 16 },
-        { header: 'Top SKU',      key: 'topsku',   width: 16 },
+        { header: 'Top SKU (Period)', key: 'topsku', width: 16 },
       ];
       exportRows.forEach((r, i) => {
         const totalSaleVisits = r.total_visits - (r.total_not_sold_visits || 0);
@@ -242,6 +255,13 @@ export default function ShopSalesTrend({
   const displayRows = shopSearch.trim()
     ? rows.filter(r => (r.shop_name || '').toLowerCase().includes(shopSearch.toLowerCase()))
     : rows;
+
+  // Reset pagination when filter/search changes
+  useEffect(() => {
+    setVisibleCount(10);
+  }, [shopSearch, rows]);
+
+  const visibleRows = displayRows.slice(0, visibleCount);
 
   const toggleExpand = (shopId) =>
     setExpanded(prev => ({ ...prev, [shopId]: !prev[shopId] }));
@@ -308,8 +328,6 @@ export default function ShopSalesTrend({
         </button>
       </div>}
 
-
-
       {/* Error */}
       {error && (
         <div style={{
@@ -336,8 +354,9 @@ export default function ShopSalesTrend({
 
       {/* Shop cards */}
       {!loading && displayRows.length > 0 && (
+        <>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {displayRows.map((shop) => {
+          {visibleRows.map((shop) => {
             const isOpen = !!expanded[shop.shop_id];
             const trend  = getTrend(shop.trend);
             const totalSaleVisits = shop.total_visits - (shop.total_not_sold_visits || 0);
@@ -384,7 +403,7 @@ export default function ShopSalesTrend({
                   </div>
 
                   {/* Stat chips */}
-                  <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' }}>
                     <StatChip label="Visits"   value={shop.total_visits} color="#2563eb" />
                     <StatChip label="Cartons"  value={shop.total_sold}   color={primary} />
                     <StatChip
@@ -392,6 +411,13 @@ export default function ShopSalesTrend({
                       value={`${efficiency}%`}
                       color={efficiency >= 60 ? '#16a34a' : efficiency >= 30 ? '#f59e0b' : '#dc2626'}
                     />
+                    {shop.top_sku && (
+                      <StatChip
+                        label="Top SKU (period)"
+                        value={`${shop.top_sku}${shop.top_sku_sold ? ': ' + shop.top_sku_sold + ' ctn' : ''}`}
+                        color="#7c3aed"
+                      />
+                    )}
                   </div>
 
                   {/* Trend badge */}
@@ -426,7 +452,7 @@ export default function ShopSalesTrend({
                         <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                           <div style={{
                             background: '#f9fafb', borderRadius: 8, padding: '10px 12px',
-                            border: '1px solid #f3f4f6',
+                            border: '1px solid #f3f4f6', maxWidth: '100%', overflow: 'hidden',
                           }}>
                             <TrendChart data={shop.trend} color={primary} />
                           </div>
@@ -481,6 +507,38 @@ export default function ShopSalesTrend({
             );
           })}
         </div>
+
+        {/* Show more / Show less */}
+        {displayRows.length > 10 && (
+          <div style={{ textAlign: 'center', marginTop: 12 }}>
+            {visibleCount < displayRows.length ? (
+              <button
+                onClick={() => setVisibleCount(prev => Math.min(prev + 10, displayRows.length))}
+                style={{
+                  padding: '8px 20px', background: '#f3f4f6', color: '#374151',
+                  border: '1px solid #e5e7eb', borderRadius: 8, cursor: 'pointer',
+                  fontSize: '0.82rem', fontWeight: 600, display: 'inline-flex',
+                  alignItems: 'center', gap: 6,
+                }}
+              >
+                &#9660; Load {Math.min(10, displayRows.length - visibleCount)} more
+              </button>
+            ) : (
+              <button
+                onClick={() => setVisibleCount(10)}
+                style={{
+                  padding: '8px 20px', background: '#f3f4f6', color: '#374151',
+                  border: '1px solid #e5e7eb', borderRadius: 8, cursor: 'pointer',
+                  fontSize: '0.82rem', fontWeight: 600, display: 'inline-flex',
+                  alignItems: 'center', gap: 6,
+                }}
+              >
+                &#9650; Show less
+              </button>
+            )}
+          </div>
+        )}
+        </>
       )}
 
       <ReportPreviewModal
@@ -488,7 +546,7 @@ export default function ShopSalesTrend({
         onClose={() => setPreviewOpen(false)}
         title="Sales Trend Insights"
         subtitle={dateFrom ? `${dateFrom}${dateTo ? ' → ' + dateTo : ''}` : `${MONTHS[parseInt(month) - 1]} ${year}`}
-        headers={['#', 'Shop', 'Region', 'Subregion', 'Last Visit', 'Visits', 'Cartons Sold', 'Efficiency %', 'Trend', 'Top SKU']}
+        headers={['#', 'Shop', 'Region', 'Subregion', 'Last Visit', 'Visits', 'Cartons Sold', 'Efficiency %', 'Trend', 'Top SKU (Period)']}
         rows={rows.map((r, i) => {
           const totalSaleVisits = r.total_visits - (r.total_not_sold_visits || 0);
           const eff = r.total_visits > 0 ? Math.round((totalSaleVisits / r.total_visits) * 100) : 0;
@@ -503,7 +561,7 @@ export default function ShopSalesTrend({
             r.total_sold,
             eff + '%',
             trendInfo.label,
-            r.top_sku || '—',
+            r.top_sku ? `${r.top_sku}: ${r.top_sku_sold || 0} ctn` : '—',
           ];
         })}
         onExport={handleExport}
