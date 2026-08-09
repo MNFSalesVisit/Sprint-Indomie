@@ -3135,8 +3135,10 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
   const [periodShops,   setPeriodShops]   = useState(null);
   const [custPreviewOpen, setCustPreviewOpen] = useState(false);
   const [custStockVisible, setCustStockVisible] = useState(10);
+  const [selectedTrendPoint, setSelectedTrendPoint] = useState(null);
   const [custShopSearch,   setCustShopSearch]   = useState('');
   const custDebounceRef = useRef(null);
+  const trendChartRef = useRef(null);
 
   // ---- NEW PAGINATION STATE FOR SALES TRENDS ----
   const [salesVisibleCount, setSalesVisibleCount] = useState(10);
@@ -3204,11 +3206,21 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
       const rawCartons = r.headers.get('X-Total-Cartons');
       const rawVisits  = r.headers.get('X-Total-Visits');
       const rawShops   = r.headers.get('X-Active-Shops');
-      const d = await r.json();
+      let d;
+      try {
+        d = await r.json();
+      } catch (jsonErr) {
+        d = null;
+      }
       if (sec === 'stock') {
         window.__lastStockApi = d;
       }
-      if (!r.ok) { setError(d.error || 'Failed to load'); setRows([]); return; }
+      if (!r.ok) {
+        const message = (d && d.error) ? d.error : `API error ${r.status}: ${r.statusText}`;
+        setError(message);
+        setRows([]);
+        return;
+      }
       let resultRows;
       if (sec === 'stock' && d && typeof d === 'object' && 'data' in d) {
         setStockDebug(d._debug || null);
@@ -3242,6 +3254,16 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
     }, 400);
     return () => clearTimeout(custDebounceRef.current);
   }, [token, section, year, month, dateFrom, dateTo, subregionId, regionId]);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (trendChartRef.current && !trendChartRef.current.contains(event.target)) {
+        setSelectedTrendPoint(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const monthLabel = `${MONTHS[parseInt(month) - 1]} ${year}`;
   const themeHex   = (primary || '#2563eb').replace('#', '');
@@ -3776,7 +3798,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                                 {row.trend?.length > 0 && (
                                   <div className={styles.custTrendWrap}>
                                     <div className={styles.custTrendTitle}>
-                                      Last 12 Visits — {(() => {
+                                      Recent Activity — {(() => {
                                         const trendPoints = row.trend.slice(-12);
                                         const firstValue = trendPoints[0]?.sold != null
                                           ? trendPoints[0].sold
@@ -3799,9 +3821,11 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                                     </div>
                                     <div className={styles.custTrendLineChart}>
                                       {(() => {
+                                        const selectedPoint = selectedTrendPoint?.shopId === row.shop_id ? selectedTrendPoint : null;
                                         const recentPoints = row.trend.slice(-12).map((t, idx) => ({
                                           date: t.date,
                                           value: t.sold != null ? t.sold : (t.cartons ?? 0),
+                                          skus: t.sold_skus || [],
                                           idx,
                                         }));
 
@@ -3824,7 +3848,7 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                                         const polyPoints = coords.map(p => `${p.x},${p.y}`).join(' ');
 
                                         return (
-                                          <div style={{ width: '100%', overflowX: 'auto' }}>
+                                          <div ref={trendChartRef} style={{ width: '100%', overflowX: 'auto', position: 'relative' }}>
                                             <svg width={width} height={height} style={{ display: 'block' }}>
                                               <line x1={12} y1={baselineY} x2={width - 12} y2={baselineY} stroke="#cbd5e1" strokeWidth="1" />
                                               <polyline
@@ -3837,6 +3861,17 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                                               />
                                               {coords.map((p) => (
                                                 <g key={p.date}>
+                                                  <circle
+                                                    cx={p.x}
+                                                    cy={p.y}
+                                                    r="18"
+                                                    fill="rgba(255,255,255,0.01)"
+                                                    style={{ cursor: 'pointer', pointerEvents: 'all' }}
+                                                    onClick={() => {
+                                                      const alreadySelected = selectedTrendPoint?.shopId === row.shop_id && selectedTrendPoint?.date === p.date;
+                                                      setSelectedTrendPoint(alreadySelected ? null : { shopId: row.shop_id, date: p.date, value: p.value, skus: p.skus, x: p.x, y: p.y });
+                                                    }}
+                                                  />
                                                   <circle cx={p.x} cy={p.y} r="4" fill={primary} />
                                                   <text x={p.x} y={Math.max(12, p.y - 10)} textAnchor="middle" fontSize="10" fill={primary} fontWeight="700">
                                                     {p.value}
@@ -3847,6 +3882,43 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                                                 </g>
                                               ))}
                                             </svg>
+                                            {selectedPoint && selectedPoint.shopId === row.shop_id && (
+                                              <div style={{
+                                                position: 'absolute',
+                                                left: Math.min(width - 150, Math.max(8, selectedPoint.x - 70)),
+                                                top: Math.max(8, selectedPoint.y - (selectedPoint.value > 0 ? 72 : 92)),
+                                                zIndex: 10,
+                                                width: 140,
+                                                padding: '6px 8px',
+                                                borderRadius: 12,
+                                                border: '1px solid #cbd5e1',
+                                                background: '#ffffff',
+                                                boxShadow: '0 6px 18px rgba(15, 23, 42, 0.12)',
+                                                color: '#0f172a',
+                                                fontSize: '0.75rem',
+                                              }}>
+                                                <div style={{ fontWeight: 700, marginBottom: 4, lineHeight: 1.2 }}>
+                                                  {selectedPoint.value > 0
+                                                    ? `${selectedPoint.value.toLocaleString()} ctn`
+                                                    : 'Not sold'}
+                                                </div>
+                                                {selectedPoint.value > 0 ? (
+                                                  <div style={{ display: 'grid', gap: 3 }}>
+                                                    {(selectedPoint.skus || []).slice(0, 2).map((sku, idx) => (
+                                                      <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+                                                        <span style={{ fontWeight: 700 }}>{sku.sku}</span>
+                                                        <span style={{ color: '#64748b' }}>{sku.sold.toLocaleString()}</span>
+                                                      </div>
+                                                    ))}
+                                                    {selectedPoint.skus.length > 2 && (
+                                                      <div style={{ color: '#64748b' }}>+{selectedPoint.skus.length - 2} more</div>
+                                                    )}
+                                                  </div>
+                                                ) : (
+                                                  <div style={{ color: '#64748b' }}>No sales</div>
+                                                )}
+                                              </div>
+                                            )}
                                             <div style={{ marginTop: 8, fontSize: '0.82rem', color: '#475569' }}>
                                               Lifetime Cartons Sold: <strong>{(row.total_sold || 0).toLocaleString()}</strong> ctn
                                               <span style={{ margin: '0 8px', color: '#94a3b8' }}>·</span>
@@ -4086,7 +4158,22 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                                             />
                                             {coords.map((p) => (
                                               <g key={p.date}>
-                                                <circle cx={p.x} cy={p.y} r="4" fill={primary} />
+                                                <circle
+                                                  cx={p.x}
+                                                  cy={p.y}
+                                                  r="10"
+                                                  fill="transparent"
+                                                  style={{ cursor: 'pointer', pointerEvents: 'all' }}
+                                                  onPointerEnter={() => setHoveredTrendPoint({ shopId: row.shop_id, date: p.date, value: p.value, skus: p.skus })}
+                                                  onPointerMove={() => setHoveredTrendPoint({ shopId: row.shop_id, date: p.date, value: p.value, skus: p.skus })}
+                                                  onPointerLeave={() => setHoveredTrendPoint(null)}
+                                                />
+                                                <circle
+                                                  cx={p.x}
+                                                  cy={p.y}
+                                                  r="4"
+                                                  fill={primary}
+                                                />
                                                 <text x={p.x} y={Math.max(12, p.y - 10)} textAnchor="middle" fontSize="10" fill={primary} fontWeight="700">
                                                   {p.value}
                                                 </text>
@@ -4096,6 +4183,47 @@ function CustomerAnalysisTab({ token, primary, branding, regionFilter }) {
                                               </g>
                                             ))}
                                           </svg>
+                                          {hoveredPoint && (
+                                            <div style={{
+                                              marginTop: 10,
+                                              padding: '10px 12px',
+                                              borderRadius: 16,
+                                              border: '1px solid #e2e8f0',
+                                              background: '#f8fafc',
+                                              color: '#0f172a',
+                                              fontSize: '0.82rem',
+                                            }}>
+                                              <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                                                {hoveredPoint.date} · {hoveredPoint.value > 0 ? `${hoveredPoint.value.toLocaleString()} cartons sold` : 'Not Sold'}
+                                              </div>
+                                              {hoveredPoint.value > 0 ? (
+                                                hoveredPoint.skus.length > 0 ? (
+                                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                                    {hoveredPoint.skus.map((sku, idx) => (
+                                                      <div key={idx} style={{
+                                                        padding: '6px 10px',
+                                                        borderRadius: 12,
+                                                        background: '#ffffff',
+                                                        border: '1px solid #e2e8f0',
+                                                        minWidth: 120,
+                                                        fontSize: '0.8rem',
+                                                      }}>
+                                                        <strong>{sku.sku}</strong>
+                                                        {sku.name ? ` · ${sku.name}` : ''}
+                                                        <div style={{ color: '#64748b', marginTop: 2 }}>
+                                                          {sku.sold.toLocaleString()} ctn
+                                                        </div>
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                ) : (
+                                                  <div style={{ color: '#64748b' }}>Sold, SKU details unavailable.</div>
+                                                )
+                                              ) : (
+                                                <div style={{ color: '#64748b' }}>Not Sold</div>
+                                              )}
+                                            </div>
+                                          )}
                                           <div style={{ marginTop: 8, fontSize: '0.82rem', color: '#475569' }}>
                                             Lifetime Cartons Sold: <strong>{(row.total_sold || 0).toLocaleString()}</strong> ctn
                                           </div>

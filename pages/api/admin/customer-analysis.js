@@ -481,6 +481,7 @@ export default async function handler(req, res) {
         last_visit: null,
         by_sku: {},
         trend: {},
+        trendBySku: {},
         period_sold: 0,
         period_visits: 0,
         period_not_sold_visits: 0,
@@ -498,9 +499,15 @@ export default async function handler(req, res) {
       if (daySold === 0) a.not_sold_visits++;
       const day = v.created_at.slice(0, 10);
       a.trend[day] = (a.trend[day] || 0) + daySold;
+      if (daySold > 0) {
+        a.trendBySku[day] = a.trendBySku[day] || {};
+      }
       if (!a.last_visit || v.created_at > a.last_visit) a.last_visit = v.created_at;
       visitItems.forEach(i => {
-        if (i.sold > 0) a.by_sku[i.product_id] = (a.by_sku[i.product_id] || 0) + i.sold;
+        if (i.sold > 0) {
+          a.by_sku[i.product_id] = (a.by_sku[i.product_id] || 0) + i.sold;
+          a.trendBySku[day][i.product_id] = (a.trendBySku[day][i.product_id] || 0) + i.sold;
+        }
       });
       // Period-specific aggregation: used for sorting and top_sku
       if (periodVisitIdSet.has(v.id)) {
@@ -529,7 +536,17 @@ export default async function handler(req, res) {
           .filter(x => (x.sold || 0) > 0)
           .sort((a, b) => b.sold - a.sold);
         const trend = Object.entries(a.trend)
-          .map(([date, sold]) => ({ date, sold }))
+          .map(([date, sold]) => {
+            const skus = Object.entries(a.trendBySku[date] || {})
+              .map(([pid, soldQty]) => ({
+                sku: productMap[parseInt(pid)]?.sku || '?',
+                name: productMap[parseInt(pid)]?.name || 'Unknown',
+                sold: soldQty,
+              }))
+              .filter(x => (x.sold || 0) > 0)
+              .sort((a, b) => b.sold - a.sold);
+            return { date, sold, sold_skus: skus };
+          })
           .sort((a, b) => a.date.localeCompare(b.date));
         const sr = subregionMap[s.subregion_id];
         return {
